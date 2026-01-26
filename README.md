@@ -98,6 +98,12 @@ cd robocup_ur5e
 
 # View logs
 docker-compose logs -f
+
+# Enter container with ROS environment ready
+docker exec -it robocup_brain bash -c "source /workspace/scripts/setup_container_env.sh && bash"
+
+# Test UR5e arm control
+docker exec -it robocup_brain bash -c "source /workspace/scripts/setup_container_env.sh && python3 /workspace/src/robocup_brain/nodes/test_ur5e_control.py"
 ```
 
 ---

@@ -54,6 +54,22 @@ Shows:
 
 ## 🔧 Utility Scripts
 
+### `setup_container_env.sh`
+**Setup ROS environment inside containers** ⭐
+
+```bash
+# Inside container
+source /workspace/scripts/setup_container_env.sh
+```
+
+This script:
+- Sources ROS Noetic and workspace
+- Configures ROS network (`ROS_MASTER_URI`, `ROS_IP`)
+- Tests ROS Master connection
+- Shows available topics
+
+**Use this every time you enter a container!**
+
 ### `download_models.sh`
 **Download required models and datasets**
 
@@ -111,11 +127,14 @@ docker-compose restart <service>
 # View real-time logs
 docker-compose logs -f
 
-# Enter container
-docker-compose exec brain bash
+# Enter container and setup ROS environment
+docker exec -it robocup_brain bash -c "source /workspace/scripts/setup_container_env.sh && bash"
 
-# Check ROS topics
-docker-compose exec brain bash -c "source /workspace/devel/setup.bash && rostopic list"
+# Quick ROS test
+docker exec -it robocup_brain bash -c "source /workspace/scripts/setup_container_env.sh && rostopic list"
+
+# Run arm control test
+docker exec -it robocup_brain bash -c "source /workspace/scripts/setup_container_env.sh && python3 /workspace/src/robocup_brain/nodes/test_ur5e_control.py"
 ```
 
 ## 🔐 Permissions
