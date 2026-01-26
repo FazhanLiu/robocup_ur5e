@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>perception_grasp</name>
+  <version>1.0.0</version>
+  <description>GraspNet-based grasp pose estimation for RoboCup (Muye Yuan)</description>
+  
+  <maintainer email="muye@robocup.org">Muye Yuan</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>common_msgs</depend>
+</package>

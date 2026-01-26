@@ -1,0 +1,14 @@
+# YOLO 配置文件
+model:
+  path: "yolov8n.pt"  # 可选: yolov8s.pt, yolov8m.pt, yolov8l.pt, yolov8x.pt
+  
+detection:
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+  max_detections: 100
+  
+classes:
+  # 按需筛选类别（留空则检测所有 COCO 类别）
+  filter: []
+  # 示例：只检测特定物体
+  # filter: ['bottle', 'cup', 'bowl', 'apple', 'orange']

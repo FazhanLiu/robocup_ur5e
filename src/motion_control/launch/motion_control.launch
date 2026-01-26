@@ -1,0 +1,15 @@
+<launch>
+  <!-- Motion Control Node for UR5e Robot -->
+  
+  <arg name="robot_name" default="ur5e"/>
+  <arg name="base_frame" default="base_link"/>
+  <arg name="ee_frame" default="tool0"/>
+  
+  <node name="motion_control" pkg="motion_control" type="motion_control_node.py" output="screen">
+    <param name="robot_name" value="$(arg robot_name)"/>
+    <param name="base_frame" value="$(arg base_frame)"/>
+    <param name="ee_frame" value="$(arg ee_frame)"/>
+    
+    <rosparam file="$(find motion_control)/config/ur5e_config.yaml" command="load"/>
+  </node>
+</launch>

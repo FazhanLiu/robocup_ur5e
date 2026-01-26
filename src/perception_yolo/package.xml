@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>perception_yolo</name>
+  <version>1.0.0</version>
+  <description>YOLO-based object detection for RoboCup (Fazhan &amp; Ruiyi)</description>
+  
+  <maintainer email="fazhan@robocup.org">Fazhan</maintainer>
+  <maintainer email="ruiyi@robocup.org">Ruiyi</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>common_msgs</depend>
+</package>

@@ -1,0 +1,18 @@
+# Perception Grasp - 依赖项
+# CUDA 11.3 兼容版本（为 GraspNet-1Billion 遗留代码）
+
+torch==1.12.1+cu113
+torchvision==0.13.1+cu113
+--extra-index-url https://download.pytorch.org/whl/cu113
+
+open3d==0.17.0
+numpy==1.23.5
+scipy==1.10.1
+
+# GraspNet 依赖（需要手动克隆仓库）
+# git clone https://github.com/graspnet/graspnet-baseline.git
+# cd graspnet-baseline && pip install -e .
+
+# ROS Python 依赖
+rospkg
+catkin_pkg

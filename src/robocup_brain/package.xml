@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>robocup_brain</name>
+  <version>1.0.0</version>
+  <description>Behavior tree-based decision making for RoboCup UR5e (Suhang Xia)</description>
+  
+  <maintainer email="suhang@robocup.org">Suhang Xia</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>actionlib</depend>
+  <depend>common_msgs</depend>
+  
+  <exec_depend>py_trees</exec_depend>
+  <exec_depend>py_trees_ros</exec_depend>
+</package>

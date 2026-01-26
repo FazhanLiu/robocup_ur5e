@@ -1,0 +1,14 @@
+# GraspNet 配置
+model:
+  checkpoint_path: "graspnet_checkpoints/checkpoint.tar"
+  
+estimation:
+  num_candidates: 5
+  min_quality_threshold: 0.3
+  collision_threshold: 0.05  # 碰撞检测阈值（米）
+  
+pointcloud:
+  voxel_size: 0.005  # 下采样体素大小（米）
+  statistical_filter:
+    nb_neighbors: 20
+    std_ratio: 2.0

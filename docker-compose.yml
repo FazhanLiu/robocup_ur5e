@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # RoboCup Brain (Suhang's Decision Node)
+  # ============================================================================
+  robocup_brain:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.brain
+    image: robocup_ur5e/brain:latest
+    container_name: robocup_brain
+    network_mode: "host"  # 最小化延迟
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
+      - ROS_IP=${ROS_IP}
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./src/common_msgs:/workspace/src/common_msgs:ro
+      - ./src/robocup_brain:/workspace/src/robocup_brain:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw  # GUI 支持
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # ============================================================================
+  # Perception YOLO (Fazhan & Ruiyi's Detection Node)
+  # ============================================================================
+  perception_yolo:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.yolo
+    image: robocup_ur5e/perception_yolo:latest
+    container_name: perception_yolo
+    network_mode: "host"
+    runtime: nvidia  # 启用 NVIDIA GPU
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
+      - ROS_IP=${ROS_IP}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./src/common_msgs:/workspace/src/common_msgs:ro
+      - ./src/perception_yolo:/workspace/src/perception_yolo:ro
+      - ./models:/workspace/models:rw  # 模型目录
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # ============================================================================
+  # Perception Grasp (Muye Yuan's Grasp Estimation Node)
+  # ============================================================================
+  perception_grasp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.grasp
+    image: robocup_ur5e/perception_grasp:latest
+    container_name: perception_grasp
+    network_mode: "host"
+    runtime: nvidia  # 启用 NVIDIA GPU (CUDA 11.3)
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
+      - ROS_IP=${ROS_IP}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./src/common_msgs:/workspace/src/common_msgs:ro
+      - ./src/perception_grasp:/workspace/src/perception_grasp:ro
+      - ./graspnet_checkpoints:/workspace/graspnet_checkpoints:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+# ============================================================================
+# 网络配置
+# ============================================================================
+# 使用 host 模式，无需额外网络配置

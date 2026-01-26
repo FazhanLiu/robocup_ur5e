@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- ROS Master URI 配置 -->
+  <arg name="ros_master_uri" default="http://192.168.56.101:11311" />
+  <param name="ros_master_uri" value="$(arg ros_master_uri)" />
+  
+  <!-- 启动 Brain Node -->
+  <node name="robocup_brain" pkg="robocup_brain" type="brain_node.py" output="screen">
+    <param name="update_rate" value="10.0" />
+  </node>
+</launch>

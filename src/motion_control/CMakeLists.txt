@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(motion_control)
+
+find_package(catkin REQUIRED COMPONENTS
+  rospy
+  std_msgs
+  geometry_msgs
+  trajectory_msgs
+  sensor_msgs
+  control_msgs
+  common_msgs
+  tf2_ros
+  tf2_geometry_msgs
+)
+
+catkin_package(
+  CATKIN_DEPENDS
+    rospy
+    std_msgs
+    geometry_msgs
+    trajectory_msgs
+    sensor_msgs
+    control_msgs
+    common_msgs
+    tf2_ros
+    tf2_geometry_msgs
+)
+
+catkin_install_python(PROGRAMS
+  nodes/motion_control_node.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch config
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)

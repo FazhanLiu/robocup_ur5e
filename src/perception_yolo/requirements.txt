@@ -1,0 +1,12 @@
+# Perception YOLO - 依赖项
+# CUDA 12.0 兼容版本（Python 3.8）
+
+torch==2.4.1
+torchvision==0.19.1
+ultralytics==8.3.0
+opencv-python==4.10.0.84
+numpy==1.24.4
+
+# ROS Python 依赖
+rospkg
+catkin_pkg

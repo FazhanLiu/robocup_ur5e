@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="checkpoint_path" default="graspnet_checkpoints/checkpoint.tar" />
+  <arg name="num_grasp_candidates" default="5" />
+  <arg name="pointcloud_topic" default="/camera/depth/points" />
+  
+  <node name="grasp_estimator" pkg="perception_grasp" type="grasp_estimator_node.py" output="screen">
+    <param name="checkpoint_path" value="$(arg checkpoint_path)" />
+    <param name="num_grasp_candidates" value="$(arg num_grasp_candidates)" />
+    <param name="pointcloud_topic" value="$(arg pointcloud_topic)" />
+  </node>
+</launch>
