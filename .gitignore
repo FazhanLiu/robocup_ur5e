@@ -41,19 +41,74 @@ devel_isolated/
 # Docker
 .dockerignore
 
-# Models
-models/*.pt
-models/*.pth
-graspnet_checkpoints/*.tar
-graspnet_checkpoints/*.pth
+# ============================================
+# Model Weights & Checkpoints
+# ============================================
+# Large model files (>100MB) should be hosted on Hugging Face
+# Small config/metadata files (<10MB) can be committed to Git
+
+# YOLO weights (usually 5-50MB, can commit small ones)
+weights/yolo/*.pt
+weights/yolo/*.weights
+!weights/yolo/yolov8n.pt          # Nano model (~6MB) - OK to commit
+!weights/yolo/config.yaml         # Always commit configs
+
+# GraspNet checkpoints (usually 100MB+, use Hugging Face)
+weights/graspnet/*.pth
+weights/graspnet/*.tar
+weights/graspnet/*.ckpt
+!weights/graspnet/*.json          # Commit config files
+!weights/graspnet/README.md       # Commit download instructions
+
+# Backup checkpoints during training
+*.ckpt.backup
+checkpoints/
+runs/
+wandb/
+
+# ============================================
+# Datasets & Large Data Files
+# ============================================
+# All datasets should be hosted on Hugging Face or external storage
+
+data/datasets/*
+data/ycb_objects/*.ply            # 3D mesh files
+data/ycb_objects/*.obj
+data/ycb_objects/*.stl
+!data/datasets/.gitkeep           # Keep folder structure
+!data/ycb_objects/list.txt        # Keep object list
+!data/ycb_objects/README.md       # Keep download instructions
+
+# Processed data
+*.npy
+*.npz
+*.pickle
+*.pkl
+
+# ============================================
+# Training & Experiment Outputs
+# ============================================
+experiments/
+outputs/
+results/
+tensorboard/
 
 # Logs
 *.log
+*.out
 
+# ============================================
+# System & IDE
+# ============================================
 # OS
 .DS_Store
 Thumbs.db
+.Spotlight-V100
+.Trashes
 
 # Temporary files
 *.tmp
 *.bak
+*.swp
+*.swo
+*~

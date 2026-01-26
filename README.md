@@ -71,10 +71,11 @@ This project implements an autonomous object sorting system for the RoboCup comp
 
 ### For Team Members
 
-1. **Read the setup guide**: [`SETUP_GUIDE.md`](SETUP_GUIDE.md) - Platform-specific instructions (Ubuntu/WSL2/Mac)
-2. **Read the team guide**: [`TEAM_README.md`](TEAM_README.md) - Your specific tasks and interfaces
-3. **Find your TODOs**: Search for `TODO` comments in your assigned file
-4. **Start developing**: Edit code, restart containers, test, commit!
+1. **Read the setup guide**: [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md) - Platform-specific instructions (Ubuntu/WSL2/Mac)
+2. **Read the team guide**: [`docs/TEAM_README.md`](docs/TEAM_README.md) - Your specific tasks and interfaces
+3. **Download models**: Run `./scripts/download_models.sh` to get YOLO and GraspNet weights
+4. **Find your TODOs**: Search for `TODO` comments in your assigned file
+5. **Start developing**: Edit code, restart containers, test, commit!
 
 ### Quick Commands
 
@@ -83,11 +84,17 @@ This project implements an autonomous object sorting system for the RoboCup comp
 git clone https://github.com/your-username/robocup_ur5e.git
 cd robocup_ur5e
 
+# Download required models (first time only)
+./scripts/download_models.sh
+
+# Build Docker images (first time only, 30-60 min)
+./scripts/rebuild_all.sh
+
 # Start all services
-./start.sh
+./scripts/start.sh
 
 # Check system status
-./status.sh
+./scripts/status.sh
 
 # View logs
 docker-compose logs -f
@@ -95,16 +102,32 @@ docker-compose logs -f
 
 ---
 
-## 📦 Package Structure
+## 📦 Project Structure
 
 ```
-src/
-├── common_msgs/              # Shared ROS message definitions
-├── robocup_brain/            # FSM & system orchestration (Suhang)
-├── motion_control/           # IK/FK/Dynamics (Jiaxin)
-├── path_planning/            # Path planning & collision avoidance (Sarvin & Chang)
-├── perception_yolo/          # YOLOv8 object detection (Fazhan & Ruiyi)
-└── perception_grasp/         # GraspNet grasp estimation (Muye)
+robocup_ur5e/
+├── src/                      # ROS packages
+│   ├── common_msgs/          # Shared message definitions
+│   ├── robocup_brain/        # FSM orchestration (Suhang)
+│   ├── motion_control/       # IK/FK/Dynamics (Jiaxin)
+│   ├── path_planning/        # Path planning (Sarvin & Chang)
+│   ├── perception_yolo/      # Object detection (Fazhan & Ruiyi)
+│   └── perception_grasp/     # Grasp estimation (Muye)
+├── docker/                   # Docker configurations
+├── docs/                     # 📚 All documentation
+│   ├── SETUP_GUIDE.md        # ⭐ Platform setup
+│   ├── TEAM_README.md        # ⭐ Team tasks
+│   └── MODELS_AND_DATASETS.md # ⭐ Model downloads
+├── scripts/                  # 🔧 System scripts
+│   ├── start.sh              # Start system
+│   ├── rebuild_all.sh        # Build images
+│   └── download_models.sh    # Download weights
+├── weights/                  # 🤖 Model weights (Git LFS / Hugging Face)
+│   ├── yolo/                 # YOLO detection models
+│   └── graspnet/             # GraspNet checkpoints
+└── data/                     # 📊 Datasets (Hugging Face)
+    ├── datasets/             # Training data
+    └── ycb_objects/          # YCB object models
 ```
 
 ---
@@ -141,11 +164,12 @@ src/
 
 | Document | Purpose |
 |----------|---------|
-| **[SETUP_GUIDE.md](SETUP_GUIDE.md)** ⭐ | Platform-specific setup (Ubuntu/WSL2/Mac) |
-| **[TEAM_README.md](TEAM_README.md)** ⭐ | Team member tasks and interfaces |
-| **[QUICKSTART.md](QUICKSTART.md)** | Command reference |
-| **[CONTRIBUTING.md](CONTRIBUTING.md)** | Development guidelines |
-| **[ARCHITECTURE_SUMMARY.md](ARCHITECTURE_SUMMARY.md)** | System architecture overview |
+| **[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md)** ⭐ | Platform-specific setup (Ubuntu/WSL2/Mac) |
+| **[docs/TEAM_README.md](docs/TEAM_README.md)** ⭐ | Team member tasks and interfaces |
+| **[docs/MODELS_AND_DATASETS.md](docs/MODELS_AND_DATASETS.md)** ⭐ | Model weights and dataset downloads |
+| **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** | Development guidelines |
+| **[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)** | Version compatibility |
+| **[scripts/README.md](scripts/README.md)** | Script documentation |
 
 ---
 
