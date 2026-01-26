@@ -240,7 +240,7 @@ Found a bug? Please open an issue with:
 
 ## 📞 Contact
 
-- **Project Lead**: Suhang Xia - suhang@robocup.org
+- **Project Lead**: Suhang Xia - suhang.xia@kcl.ac.uk
 - **GitHub Issues**: [Report bugs or request features](https://github.com/your-username/robocup_ur5e/issues)
 
 ---
