@@ -43,9 +43,9 @@ class UR5eController:
         )
         
         # Action client for trajectory control
-        rospy.loginfo("[Test] Connecting to /arm_controller/follow_joint_trajectory...")
+        rospy.loginfo("[Test] Connecting to /pos_joint_traj_controller/follow_joint_trajectory...")
         self.client = actionlib.SimpleActionClient(
-            '/arm_controller/follow_joint_trajectory',
+            '/pos_joint_traj_controller/follow_joint_trajectory',
             FollowJointTrajectoryAction
         )
         
