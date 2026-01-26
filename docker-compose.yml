@@ -12,12 +12,13 @@ services:
     container_name: robocup_brain
     network_mode: "host"  # 最小化延迟
     environment:
-      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
-      - ROS_IP=${ROS_IP}
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
+      - ROS_IP=${ROS_IP:-127.0.0.1}
       - DISPLAY=${DISPLAY}
     volumes:
       - ./src/common_msgs:/workspace/src/common_msgs:ro
       - ./src/robocup_brain:/workspace/src/robocup_brain:ro
+      - ./scripts:/workspace/scripts:ro  # 系统脚本
       - /tmp/.X11-unix:/tmp/.X11-unix:rw  # GUI 支持
     restart: unless-stopped
     stdin_open: true
@@ -35,14 +36,15 @@ services:
     network_mode: "host"
     runtime: nvidia  # 启用 NVIDIA GPU
     environment:
-      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
-      - ROS_IP=${ROS_IP}
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
+      - ROS_IP=${ROS_IP:-127.0.0.1}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - DISPLAY=${DISPLAY}
     volumes:
       - ./src/common_msgs:/workspace/src/common_msgs:ro
       - ./src/perception_yolo:/workspace/src/perception_yolo:ro
+      - ./scripts:/workspace/scripts:ro  # 系统脚本
       - ./models:/workspace/models:rw  # 模型目录
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     deploy:
@@ -68,14 +70,15 @@ services:
     network_mode: "host"
     runtime: nvidia  # 启用 NVIDIA GPU (CUDA 11.3)
     environment:
-      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
-      - ROS_IP=${ROS_IP}
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
+      - ROS_IP=${ROS_IP:-127.0.0.1}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - DISPLAY=${DISPLAY}
     volumes:
       - ./src/common_msgs:/workspace/src/common_msgs:ro
       - ./src/perception_grasp:/workspace/src/perception_grasp:ro
+      - ./scripts:/workspace/scripts:ro  # 系统脚本
       - ./graspnet_checkpoints:/workspace/graspnet_checkpoints:rw
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     deploy:
