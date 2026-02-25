@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <launch>
-  <arg name="model_path" default="auto" />
+  <arg name="model_path" default="/workspace/weights/yolo/yolov8n.pt" />
   <arg name="confidence_threshold" default="0.5" />
   <arg name="image_topic" default="/camera/rgb/image_raw" />
   
