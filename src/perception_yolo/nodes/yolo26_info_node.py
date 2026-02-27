@@ -24,7 +24,7 @@ class Yolo26InfoNode:
         rospy.init_node("yolo26_info", anonymous=True)
 
         self.bridge = CvBridge()
-        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/yolo26m.pt")
+        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/yolo26n.pt")
         self.conf_threshold = float(rospy.get_param("~confidence_threshold", 0.5))
         self.image_topic = rospy.get_param("~image_topic", "/camera/rgb/image_raw")
         self.depth_topic = rospy.get_param("~depth_topic", "/camera/depth/image_raw")
@@ -83,6 +83,12 @@ class Yolo26InfoNode:
         now = time.time()
         if now - self._last_print < self.print_interval:
             return
+
+        # Gazebo 仿真时间（来自图像消息的 header）
+        sim_stamp = rgb_msg.header.stamp
+        sim_time = sim_stamp.to_sec()
+        rospy.loginfo("YOLO26 sim_time=%.3f (sec=%d, nsec=%d)",
+                      sim_time, sim_stamp.secs, sim_stamp.nsecs)
 
         try:
             frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
