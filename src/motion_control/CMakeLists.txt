@@ -4,6 +4,7 @@ project(motion_control)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  std_srvs
   geometry_msgs
   trajectory_msgs
   sensor_msgs
@@ -17,6 +18,7 @@ catkin_package(
   CATKIN_DEPENDS
     rospy
     std_msgs
+    std_srvs
     geometry_msgs
     trajectory_msgs
     sensor_msgs
@@ -28,6 +30,8 @@ catkin_package(
 
 catkin_install_python(PROGRAMS
   nodes/motion_control_node.py
+  nodes/gripper_monitor_node.py
+  nodes/gripper_control_node.py
   scripts/check_moveit_ik.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

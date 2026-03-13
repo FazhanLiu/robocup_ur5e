@@ -197,16 +197,13 @@ def create_behavior_tree():
         ]
     )
     
-    # 将整个流程包装成一个循环（成功后继续下一次）
-    root = py_trees.decorators.Loop(
-        name="GameLoop",
-        child=py_trees.composites.Selector(
-            name="TaskOrRecovery",
-            children=[
-                main_sequence,
-                # RecoveryBehavior() # 如果 MainTask 失败，走恢复逻辑
-            ]
-        )
+    # 根节点：main() 的 tick 循环会不断重试，无需 Loop 装饰器
+    root = py_trees.composites.Selector(
+        name="TaskOrRecovery",
+        children=[
+            main_sequence,
+            # RecoveryBehavior() # 如果 MainTask 失败，走恢复逻辑
+        ]
     )
     return root
 
