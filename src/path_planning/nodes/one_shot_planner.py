@@ -48,6 +48,9 @@ from aco_rrtstar_planner_node import (
     UR5eFK,
 )
 
+# 不传 ee_to_object_4x4 时使用的默认夹持物体包围盒半长（EE 系，米）
+DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)
+
 # 默认虚拟抓取点：与 planning_config.yaml 一致，Gazebo 箱体后方
 def get_default_virtual_grasp_point():
     """返回默认虚拟抓取点 [x, y, z]（base_link 系），与既有配置一致。"""
@@ -248,6 +251,36 @@ def _matrix_4x4_to_pose_stamped(T, frame_id="base_link"):
     return pose
 
 
+def _inv_4x4(T):
+    """4x4 齐次变换矩阵的逆（刚体变换）。"""
+    T = np.asarray(T, dtype=float).reshape(4, 4)
+    R = T[0:3, 0:3]
+    t = T[0:3, 3]
+    inv_R = R.T
+    inv_t = -inv_R.dot(t)
+    out = np.eye(4)
+    out[0:3, 0:3] = inv_R
+    out[0:3, 3] = inv_t
+    return out
+
+
+def _merge_ee_object_half_extents(ee_half_extents, ee_to_object_4x4, grasped_object_half_extents):
+    """
+    合并末端包围盒与夹持物体包围盒（均在 EE 系下），得到仍以 EE 原点为中心、能包住两者的半长 (hx, hy, hz)。
+    ee_half_extents: (hx, hy, hz) 末端盒半长；
+    ee_to_object_4x4: 末端系到物体系的变换，物体中心在 EE 系下为 T[0:3, 3]；
+    grasped_object_half_extents: (ox, oy, oz) 物体在 EE 系下的包围盒半长（沿 EE 轴）。
+    """
+    ee_hx, ee_hy, ee_hz = ee_half_extents[0], ee_half_extents[1], ee_half_extents[2]
+    T = np.asarray(ee_to_object_4x4, dtype=float).reshape(4, 4)
+    tx, ty, tz = float(T[0, 3]), float(T[1, 3]), float(T[2, 3])
+    ox, oy, oz = grasped_object_half_extents[0], grasped_object_half_extents[1], grasped_object_half_extents[2]
+    chx = max(ee_hx, abs(tx) + ox)
+    chy = max(ee_hy, abs(ty) + oy)
+    chz = max(ee_hz, abs(tz) + oz)
+    return (chx, chy, chz)
+
+
 def _compute_ik_for_pose(pose_stamped, seed_joints=None, timeout=2.0):
     """调用 /motion/compute_ik 由目标位姿求关节角，失败返回 None。"""
     if not _HAS_COMPUTE_IK:
@@ -337,6 +370,94 @@ def plan_one_shot_from_goal_pose(
         rrt_max_iter=rrt_max_iter,
         return_vis_data=return_vis_data,
         ee_half_extents=ee_half_extents,
+    )
+
+
+def plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4,
+    start_xyz,
+    start_joints,
+    ee_to_object_4x4=None,
+    obstacles=None,
+    bounds=None,
+    frame_id="base_link",
+    aco_grid_res=0.08,
+    aco_n_ants=40,
+    aco_n_iters=30,
+    aco_greedy_prob=0.3,
+    aco_elite_deposit_ratio=2.0,
+    rrt_step_size=0.12,
+    rrt_max_iter=4000,
+    return_vis_data=False,
+    ee_half_extents=None,
+    grasped_object_half_extents=None,
+    seed_joints_for_ik=None,
+    ik_timeout=2.0,
+):
+    """
+    夹住物品后规划路径，使夹持的物体到达指定位姿。可选：由「物体目标位姿」与「EE 到物体的变换」反推末端目标；
+    不传 ee_to_object_4x4 时直接将 object_goal_4x4 当作末端目标，不做换算。
+
+    Args:
+        object_goal_4x4: 4x4 齐次变换（base 系）。若 ee_to_object_4x4 为 None，则直接作为末端目标位姿；否则为夹持物体要到达的目标位姿。
+        start_xyz: [x, y, z] 起点笛卡尔位置（base_link）。
+        start_joints: 起点关节角 (6,)。
+        ee_to_object_4x4: 可选。4x4 齐次变换（末端系→物体系），夹持时物体在末端系下的位姿；物体中心在 EE 系下为 T[0:3, 3]。为 None 时不换算，object_goal_4x4 即末端目标。
+        obstacles / bounds / frame_id / aco_* / rrt_* / return_vis_data: 同 plan_one_shot_from_goal_pose。
+        ee_half_extents: 末端包围盒半长 (hx, hy, hz)；None 时从 ~end_effector_collision_box 读取。
+        grasped_object_half_extents: 夹持物体在 EE 系下的包围盒半长 (ox, oy, oz)。ee_to_object_4x4 非 None 时仅此时参与合并；ee_to_object_4x4 为 None 时用该默认物体参与合并（假定物体中心在 EE 原点），未传时用 DEFAULT_GRASPED_OBJECT_HALF_EXTENTS。
+        seed_joints_for_ik: IK 种子关节角；None 时用 start_joints。
+        ik_timeout: 等待 /motion/compute_ik 的超时（秒）。
+
+    Returns:
+        与 plan_one_shot 相同：(path_joints, trajectory) 或 (path_joints, trajectory, vis_data)。
+    """
+    object_goal_4x4 = np.asarray(object_goal_4x4, dtype=float)
+    if object_goal_4x4.shape != (4, 4):
+        object_goal_4x4 = object_goal_4x4.reshape(4, 4)
+
+    if ee_to_object_4x4 is None:
+        ee_goal_4x4 = object_goal_4x4
+    else:
+        ee_to_object_4x4 = np.asarray(ee_to_object_4x4, dtype=float)
+        if ee_to_object_4x4.shape != (4, 4):
+            ee_to_object_4x4 = ee_to_object_4x4.reshape(4, 4)
+        T_ee_object_inv = _inv_4x4(ee_to_object_4x4)
+        ee_goal_4x4 = object_goal_4x4.dot(T_ee_object_inv)
+
+    if ee_half_extents is None:
+        raw = rospy.get_param("~end_effector_collision_box", list(DEFAULT_EE_HALF_EXTENTS))
+        ee_half_extents = tuple(float(x) for x in raw[:3]) if isinstance(raw, (list, tuple)) and len(raw) >= 3 else DEFAULT_EE_HALF_EXTENTS
+    else:
+        ee_half_extents = tuple(float(x) for x in ee_half_extents[:3])
+
+    if ee_to_object_4x4 is not None and grasped_object_half_extents is not None and any(x > 0 for x in grasped_object_half_extents):
+        grasped_object_half_extents = tuple(float(x) for x in grasped_object_half_extents[:3])
+        ee_half_extents = _merge_ee_object_half_extents(ee_half_extents, ee_to_object_4x4, grasped_object_half_extents)
+    elif ee_to_object_4x4 is None:
+        obj_half = DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
+        if grasped_object_half_extents is not None and any(x > 0 for x in grasped_object_half_extents):
+            obj_half = tuple(float(x) for x in grasped_object_half_extents[:3])
+        ee_half_extents = _merge_ee_object_half_extents(ee_half_extents, np.eye(4), obj_half)
+
+    return plan_one_shot_from_goal_pose(
+        goal_pose_4x4=ee_goal_4x4,
+        start_xyz=start_xyz,
+        start_joints=start_joints,
+        obstacles=obstacles,
+        bounds=bounds,
+        frame_id=frame_id,
+        aco_grid_res=aco_grid_res,
+        aco_n_ants=aco_n_ants,
+        aco_n_iters=aco_n_iters,
+        aco_greedy_prob=aco_greedy_prob,
+        aco_elite_deposit_ratio=aco_elite_deposit_ratio,
+        rrt_step_size=rrt_step_size,
+        rrt_max_iter=rrt_max_iter,
+        return_vis_data=return_vis_data,
+        ee_half_extents=ee_half_extents,
+        seed_joints_for_ik=seed_joints_for_ik,
+        ik_timeout=ik_timeout,
     )
 
 

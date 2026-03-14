@@ -11,7 +11,7 @@
 ### 1. 相关文件
 
 - **`nodes/one_shot_planner.py`**  
-  一次性规划核心函数，供其他节点/业务逻辑调用；提供 `plan_one_shot`（目标为 xyz + goal_joints）与 `plan_one_shot_from_goal_pose`（目标为 4×4 位姿矩阵，内部调 IK）。
+  一次性规划核心函数，供其他节点/业务逻辑调用；提供 `plan_one_shot`（目标为 xyz + goal_joints）、`plan_one_shot_from_goal_pose`（目标为 4×4 末端位姿，内部调 IK）、`plan_one_shot_grasped_object_to_goal`（夹住物体后使物体到达目标位姿，可选 ee_to_object 换算）。
 - **`nodes/demo_one_shot_planning.py`**  
   演示节点：用 TF 取当前位姿、用 `/joint_states` 取当前关节、用参数取目标关节，规划后向 `/motion/command` 发布 `EXECUTE_TRAJECTORY`。
 
@@ -124,6 +124,65 @@ if path_joints and traj:
     pub.publish(cmd)
 ```
 
+#### 2.2.2 `plan_one_shot_grasped_object_to_goal(object_goal_4x4, start_xyz, start_joints, ee_to_object_4x4=None, ...)`
+
+夹住物品后规划路径，使夹持的物体到达指定位姿。**`ee_to_object_4x4` 为可选**：不传时直接将 `object_goal_4x4` 当作末端目标位姿，不做换算；传入时由「物体目标位姿」与「EE→物体变换」反推末端目标。**位姿/碰撞约束**：不传 `ee_to_object_4x4` 时仍会用默认物体大小（假定物体中心在 EE 原点）与末端盒合并做碰撞，默认大小为 `DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)`（米）；传了 `ee_to_object_4x4` 时用末端+物体变换合并。
+
+**函数签名要点：**
+
+```python
+path_joints, trajectory = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4,   # 4x4 齐次变换（base 系）；ee_to_object_4x4 为 None 时即末端目标，否则为物体目标位姿
+    start_xyz,         # [x, y, z] 起点笛卡尔位置
+    start_joints,      # 起点关节角 (6,)
+    ee_to_object_4x4=None,  # 可选。None 时不换算；否则为末端系→物体系，用于反推末端目标并合并碰撞盒
+    obstacles=None,
+    # ... 其余 ACO/RRT 参数同 plan_one_shot_from_goal_pose ...
+    ee_half_extents=None,
+    grasped_object_half_extents=None,  # 物体在 EE 系下包围盒半长；不传时 ee_to_object_4x4 为 None 用 DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
+    seed_joints_for_ik=None,
+    ik_timeout=2.0,
+)
+```
+
+- **`object_goal_4x4`**（必选）：4×4 齐次变换。`ee_to_object_4x4=None` 时直接作为末端目标；否则为夹持物体要到达的目标位姿。
+- **`ee_to_object_4x4`**（可选）：末端系→物体系 4×4；物体中心在 EE 系下为 `T[0:3, 3]`。为 `None` 时不换算，直接用 `object_goal_4x4` 作为末端目标。
+- **`grasped_object_half_extents`**（可选）：夹持物体在 EE 系下的包围盒半长 `(ox, oy, oz)`。不传时：若 `ee_to_object_4x4` 为 `None` 则用默认 `DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)` 与末端盒合并（物体中心假定在 EE 原点）；若传了 `ee_to_object_4x4` 则仅在传了该参数时参与合并。
+- **返回值**：与 `plan_one_shot` 相同。
+
+**示例**（不换算，直接末端目标）：
+
+```python
+import numpy as np
+from one_shot_planner import plan_one_shot_grasped_object_to_goal, build_motion_command_execute_trajectory
+
+# 末端目标位姿（不传 ee_to_object_4x4 时直接使用）
+ee_goal_4x4 = np.eye(4)
+ee_goal_4x4[0:3, 3] = [0.4, 0.0, 0.15]
+
+path_joints, traj = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4=ee_goal_4x4,
+    start_xyz=[0.2, 0.0, 0.3],
+    start_joints=[0, -1.57, 0, -1.57, 0, 0],
+)
+```
+
+**示例**（物体目标 + EE→物体变换，带物体碰撞盒）：
+
+```python
+object_goal_4x4 = np.eye(4)
+object_goal_4x4[0:3, 3] = [0.4, 0.0, 0.15]
+ee_to_object_4x4 = np.eye(4)
+ee_to_object_4x4[0:3, 3] = [0.05, 0.0, 0.0]   # 物体中心相对 EE 的偏移
+path_joints, traj = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4=object_goal_4x4,
+    start_xyz=[0.2, 0.0, 0.3],
+    start_joints=[0, -1.57, 0, -1.57, 0, 0],
+    ee_to_object_4x4=ee_to_object_4x4,
+    grasped_object_half_extents=(0.02, 0.02, 0.03),
+)
+```
+
 #### 2.3 `joints_to_trajectory(path_joints, joint_names, time_step=0.5)`
 
 - 将关节路径转为 `JointTrajectory`，`time_step` 为相邻点时间间隔（秒）。
@@ -194,7 +253,7 @@ rosrun path_planning demo_one_shot_planning.py _end_effector_collision_box:="[0.
 
 1. 用 **TF** 取当前末端位置 `start_xyz`（如 `base_link` → `gripper_tip_link`）。  
 2. 从 **`/joint_states`** 取当前关节 `start_joints`。  
-3. 从 **配置或上层** 取目标：若为关节角 + 笛卡尔点，则调用 `plan_one_shot(...)`；若为 **4×4 目标位姿矩阵**，则调用 `plan_one_shot_from_goal_pose(goal_pose_4x4, ...)`（内部会调 IK 求 goal_joints）。  
+3. 从 **配置或上层** 取目标：若为关节角 + 笛卡尔点，则调用 `plan_one_shot(...)`；若为 **4×4 末端目标位姿**，则调用 `plan_one_shot_from_goal_pose(goal_pose_4x4, ...)`；若为 **夹住物体后使物体到达目标**，则调用 `plan_one_shot_grasped_object_to_goal(object_goal_4x4, start_xyz, start_joints, ee_to_object_4x4=None, ...)`（不传 `ee_to_object_4x4` 时直接按末端目标规划）。  
 4. 将返回的轨迹用 `build_motion_command_execute_trajectory` 发布到 `/motion/command`。
 
 示例（伪代码）：

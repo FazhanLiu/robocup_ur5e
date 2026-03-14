@@ -11,7 +11,7 @@ This module provides a **one-shot full trajectory planning** API on top of the `
 ### 1. Related files
 
 - **`nodes/one_shot_planner.py`**  
-  Core one-shot planning functions for use by other nodes or logic. Exposes `plan_one_shot` (goal as xyz + goal_joints) and `plan_one_shot_from_goal_pose` (goal as 4×4 pose matrix; IK is called internally).
+  Core one-shot planning functions for use by other nodes or logic. Exposes `plan_one_shot` (goal as xyz + goal_joints), `plan_one_shot_from_goal_pose` (goal as 4×4 EE pose; IK called internally), and `plan_one_shot_grasped_object_to_goal` (move grasped object to target pose; optional ee_to_object conversion).
 - **`nodes/demo_one_shot_planning.py`**  
   Demo node: gets current pose from TF, current joints from `/joint_states`, goal joints from parameters, then plans and publishes `EXECUTE_TRAJECTORY` to `/motion/command`.
 
@@ -124,6 +124,65 @@ if path_joints and traj:
     pub.publish(cmd)
 ```
 
+#### 2.2.2 `plan_one_shot_grasped_object_to_goal(object_goal_4x4, start_xyz, start_joints, ee_to_object_4x4=None, ...)`
+
+Plans a path after grasping so that the grasped object reaches the given pose. **`ee_to_object_4x4` is optional**: when omitted, `object_goal_4x4` is used directly as the EE goal (no conversion); when provided, the EE goal is derived from the object goal and the EE→object transform. **Pose/collision**: when `ee_to_object_4x4` is omitted, a default object size (object center at EE origin) is still merged with the EE box for collision—`DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)` (m); when `ee_to_object_4x4` is set, the EE+object transform is used for the merged box.
+
+**Signature outline:**
+
+```python
+path_joints, trajectory = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4,   # 4x4 in base frame; when ee_to_object_4x4 is None this is the EE goal, else the object goal
+    start_xyz,         # [x, y, z] start Cartesian position
+    start_joints,      # start joint angles (6,)
+    ee_to_object_4x4=None,  # optional. None => no conversion; else EE→object transform for goal + merged box
+    obstacles=None,
+    # ... other ACO/RRT args same as plan_one_shot_from_goal_pose ...
+    ee_half_extents=None,
+    grasped_object_half_extents=None,  # object box half-lengths in EE frame; when omitted and ee_to_object_4x4 is None, uses DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
+    seed_joints_for_ik=None,
+    ik_timeout=2.0,
+)
+```
+
+- **`object_goal_4x4`** (required): 4×4 homogeneous transform. When `ee_to_object_4x4 is None`, used directly as EE goal; otherwise it is the desired pose of the grasped object.
+- **`ee_to_object_4x4`** (optional): EE frame → object frame 4×4; object center in EE frame is `T[0:3, 3]`. When `None`, no conversion—`object_goal_4x4` is the EE goal.
+- **`grasped_object_half_extents`** (optional): Half-lengths `(ox, oy, oz)` of the grasped object box in EE frame. When omitted: if `ee_to_object_4x4` is `None`, default `DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)` is merged with the EE box (object center at EE origin); if `ee_to_object_4x4` is set, merged only when this parameter is provided.
+- **Returns**: Same as `plan_one_shot`.
+
+**Example** — direct EE goal (no conversion):
+
+```python
+import numpy as np
+from one_shot_planner import plan_one_shot_grasped_object_to_goal, build_motion_command_execute_trajectory
+
+# EE goal pose (used directly when ee_to_object_4x4 is omitted)
+ee_goal_4x4 = np.eye(4)
+ee_goal_4x4[0:3, 3] = [0.4, 0.0, 0.15]
+
+path_joints, traj = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4=ee_goal_4x4,
+    start_xyz=[0.2, 0.0, 0.3],
+    start_joints=[0, -1.57, 0, -1.57, 0, 0],
+)
+```
+
+**Example** — object goal + EE→object transform with object collision box:
+
+```python
+object_goal_4x4 = np.eye(4)
+object_goal_4x4[0:3, 3] = [0.4, 0.0, 0.15]
+ee_to_object_4x4 = np.eye(4)
+ee_to_object_4x4[0:3, 3] = [0.05, 0.0, 0.0]   # object center offset from EE
+path_joints, traj = plan_one_shot_grasped_object_to_goal(
+    object_goal_4x4=object_goal_4x4,
+    start_xyz=[0.2, 0.0, 0.3],
+    start_joints=[0, -1.57, 0, -1.57, 0, 0],
+    ee_to_object_4x4=ee_to_object_4x4,
+    grasped_object_half_extents=(0.02, 0.02, 0.03),
+)
+```
+
 #### 2.3 `joints_to_trajectory(path_joints, joint_names, time_step=0.5)`
 
 - Converts a joint path to `JointTrajectory`; `time_step` is the time (seconds) between consecutive points.
@@ -194,7 +253,7 @@ Same pattern as the teach pendant: no direct IK/FK; use TF, `/joint_states`, and
 
 1. Get current EE position `start_xyz` from **TF** (e.g. `base_link` → `gripper_tip_link`).  
 2. Get current joints `start_joints` from **`/joint_states`**.  
-3. Choose goal: if you have joint angles + Cartesian point, call `plan_one_shot(...)`; if you have a **4×4 goal pose matrix**, call `plan_one_shot_from_goal_pose(goal_pose_4x4, ...)` (IK is called inside).  
+3. Choose goal: if you have joint angles + Cartesian point, call `plan_one_shot(...)`; if you have a **4×4 EE goal pose**, call `plan_one_shot_from_goal_pose(goal_pose_4x4, ...)`; if you need to **move a grasped object to a target pose**, call `plan_one_shot_grasped_object_to_goal(object_goal_4x4, start_xyz, start_joints, ee_to_object_4x4=None, ...)` (omit `ee_to_object_4x4` to use the given 4×4 directly as the EE goal).  
 4. Publish the returned trajectory to `/motion/command` with `build_motion_command_execute_trajectory`.
 
 Example (pseudo-code):
