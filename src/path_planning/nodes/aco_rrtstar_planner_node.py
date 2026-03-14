@@ -68,6 +68,15 @@ class UR5eFK:
         return T[:3, 3]
 
     @classmethod
+    def fk_full(cls, joints):
+        """返回 base 到末端执行器坐标系的 4x4 变换矩阵（含位置与姿态）。"""
+        T = np.eye(4)
+        for i, (d, a, alpha, offset) in enumerate(cls.DH):
+            theta = joints[i] + offset
+            T = T @ cls.transform_dh(d, a, alpha, theta)
+        return T
+
+    @classmethod
     def fk_chain(cls, joints):
         poses = [np.array([0, 0, 0])]
         T = np.eye(4)
@@ -185,12 +194,46 @@ def point_in_aabb(p, center, half_extents):
             cz - hz <= p[2] <= cz + hz)
 
 
-def check_collision(joints, obstacles):
+def get_ee_box_corners_in_base(T_ee, half_extents):
+    """
+    将末端执行器在 EE 系下的包围盒（中心在原点，半轴 half_extents=(hx,hy,hz)）
+    变换到 base 系，返回 8 个角点在 base 系下的坐标列表。
+    T_ee: 4x4 齐次变换 base -> ee
+    half_extents: (hx, hy, hz) 米，EE 系下包围盒半长；若全为 0 则返回空列表（不检查末端）
+    """
+    hx, hy, hz = half_extents[0], half_extents[1], half_extents[2]
+    if hx <= 0 and hy <= 0 and hz <= 0:
+        return []
+    corners_ee = [
+        (hx, hy, hz), (hx, hy, -hz), (hx, -hy, hz), (hx, -hy, -hz),
+        (-hx, hy, hz), (-hx, hy, -hz), (-hx, -hy, hz), (-hx, -hy, -hz),
+    ]
+    out = []
+    for px, py, pz in corners_ee:
+        p = T_ee @ np.array([px, py, pz, 1.0])
+        out.append(p[:3])
+    return out
+
+
+def check_collision(joints, obstacles, ee_half_extents=None):
+    """
+    检查给定关节角下机械臂（连杆原点 + 末端执行器包围盒）是否与障碍物相交。
+    ee_half_extents: (hx, hy, hz) 末端在 EE 系下的包围盒半长（米）；None 或 (0,0,0) 表示不检查末端几何。
+    """
+    # 1) 连杆上 7 个关节坐标系原点
     poses = UR5eFK.fk_chain(joints)
     for center, half in obstacles:
         for p in poses:
             if point_in_aabb(p, center, half):
                 return True
+    # 2) 末端执行器在当前姿态下的包围盒角点
+    if ee_half_extents is not None and any(e > 0 for e in ee_half_extents):
+        T_ee = UR5eFK.fk_full(joints)
+        ee_corners = get_ee_box_corners_in_base(T_ee, ee_half_extents)
+        for center, half in obstacles:
+            for p in ee_corners:
+                if point_in_aabb(p, center, half):
+                    return True
     return False
 
 
@@ -357,16 +400,21 @@ class ACOPhase:
 # =============================================================================
 # RRT* 阶段
 # =============================================================================
+# 末端执行器碰撞盒默认半长（EE 系，米）；(0,0,0) 表示不检查末端几何
+DEFAULT_EE_HALF_EXTENTS = (0.02, 0.02, 0.05)
+
+
 class RRTStarPhase:
     JOINT_NAMES = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
                    'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
     JOINT_LIMITS = [(-2*pi, 2*pi)] * 6
 
-    def __init__(self, obstacles, pheromone_fn, step_size=0.15, max_iter=3000):
+    def __init__(self, obstacles, pheromone_fn, step_size=0.15, max_iter=3000, ee_half_extents=None):
         self.obstacles = obstacles
         self.pheromone = pheromone_fn
         self.step = step_size
         self.max_iter = max_iter
+        self.ee_half_extents = ee_half_extents if ee_half_extents is not None else DEFAULT_EE_HALF_EXTENTS
 
     def _sample(self, goal_bias=0.1):
         if random.random() < goal_bias:
@@ -393,9 +441,9 @@ class RRTStarPhase:
         for i in range(1, n_checks):
             t = i / n_checks
             q = tuple(a + t * (b - a) for a, b in zip(qa, qb))
-            if check_collision(q, self.obstacles):
+            if check_collision(q, self.obstacles, self.ee_half_extents):
                 return False
-        return not check_collision(qb, self.obstacles)
+        return not check_collision(qb, self.obstacles, self.ee_half_extents)
 
     def plan(self, start, goal, return_tree=False):
         """
@@ -595,6 +643,8 @@ class ACO_RRTStarPlannerNode:
         self.use_virtual_grasp_only = rospy.get_param('~use_virtual_grasp_only', True)
         self.publish_joint_state_enabled = rospy.get_param('~publish_joint_state', False)
         self.save_matplotlib_viz = rospy.get_param('~save_matplotlib_viz', True)
+        raw_ee = rospy.get_param('~end_effector_collision_box', list(DEFAULT_EE_HALF_EXTENTS))
+        self.ee_half_extents = tuple(float(x) for x in raw_ee[:3]) if isinstance(raw_ee, (list, tuple)) and len(raw_ee) >= 3 else DEFAULT_EE_HALF_EXTENTS
         use_motion_control = rospy.get_param('~use_motion_control_kinematics', True)
         self.kinematics_client = KinematicsClient(use_motion_control=use_motion_control)
         # 可选：订阅 motion_control 发布的当前末端位姿
@@ -660,7 +710,7 @@ class ACO_RRTStarPlannerNode:
         aco.run(start_xyz, goal_xyz, n_ants=40, n_iters=30, greedy_prob=0.3, elite_deposit_ratio=2.0)
 
         pheromone_fn = lambda x, y, z: aco.get_pheromone(x, y, z)
-        rrt = RRTStarPhase(self.obstacles, pheromone_fn, step_size=0.12, max_iter=4000)
+        rrt = RRTStarPhase(self.obstacles, pheromone_fn, step_size=0.12, max_iter=4000, ee_half_extents=self.ee_half_extents)
         path = rrt.plan(start, goal)
 
         self.aco_path_xyz = aco.get_path_xyz()

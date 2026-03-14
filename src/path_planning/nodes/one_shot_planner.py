@@ -18,15 +18,24 @@ from __future__ import division
 
 import sys
 import os
+from math import sqrt
 
 # 保证可导入同目录下的 aco_rrtstar_planner_node
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+import numpy as np
 import rospy
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from geometry_msgs.msg import PoseStamped, Point, Quaternion
 from common_msgs.msg import MotionCommand
+
+try:
+    from path_planning.srv import ComputeIK
+    _HAS_COMPUTE_IK = True
+except ImportError:
+    _HAS_COMPUTE_IK = False
 
 # 从 aco_rrtstar_planner_node 复用（仅 ACO/RRT* 与障碍物，不依赖 KinematicsClient/IK/FK）
 from aco_rrtstar_planner_node import (
@@ -35,6 +44,7 @@ from aco_rrtstar_planner_node import (
     RRTStarPhase,
     GAZEBO_DEFAULT_OBSTACLES,
     DEFAULT_VIRTUAL_GRASP_POINT,
+    DEFAULT_EE_HALF_EXTENTS,
     UR5eFK,
 )
 
@@ -72,6 +82,7 @@ def plan_one_shot(
     rrt_step_size=0.12,
     rrt_max_iter=4000,
     return_vis_data=False,
+    ee_half_extents=None,
 ):
     """
     一次性规划：从 start 到 goal，避障，返回关节路径与轨迹消息。
@@ -84,6 +95,7 @@ def plan_one_shot(
         goal_joints: 目标关节角 (6,)；由配置或上层提供，不在此做 IK。
         obstacles: 障碍物列表；None 时使用 GAZEBO_DEFAULT_OBSTACLES。
         bounds: 工作空间 (wx, wy, wz)；None 时从 rospy 参数或默认值取。
+        ee_half_extents: 末端执行器在 EE 系下包围盒半长 (hx, hy, hz)，用于路径上姿态/几何碰撞检测；None 时从 ~end_effector_collision_box 读取，默认 (0.02, 0.02, 0.05)；设为 (0,0,0) 可禁用末端盒检测。
 
     Returns:
         (path_joints, trajectory_msg): path_joints 为 list of 6-tuple 或 None；trajectory_msg 为 trajectory_msgs/JointTrajectory 或 None。
@@ -111,6 +123,10 @@ def plan_one_shot(
             wz = rospy.get_param("~workspace_z", [0.0, 0.8])
             bounds = _to_bounds(wx, wy, wz)
 
+        if ee_half_extents is None:
+            raw = rospy.get_param("~end_effector_collision_box", list(DEFAULT_EE_HALF_EXTENTS))
+            ee_half_extents = tuple(float(x) for x in raw[:3]) if isinstance(raw, (list, tuple)) and len(raw) >= 3 else DEFAULT_EE_HALF_EXTENTS
+
         start = tuple(start_joints)
         goal = tuple(goal_joints)
         start_xyz = tuple(float(x) for x in start_xyz)
@@ -122,7 +138,8 @@ def plan_one_shot(
                 greedy_prob=aco_greedy_prob, elite_deposit_ratio=aco_elite_deposit_ratio)
 
         pheromone_fn = lambda x, y, z: aco.get_pheromone(x, y, z)
-        rrt = RRTStarPhase(obstacles, pheromone_fn, step_size=rrt_step_size, max_iter=rrt_max_iter)
+        rrt = RRTStarPhase(obstacles, pheromone_fn, step_size=rrt_step_size, max_iter=rrt_max_iter,
+                           ee_half_extents=ee_half_extents)
         if return_vis_data:
             path, rrt_nodes = rrt.plan(start, goal, return_tree=True)
         else:
@@ -176,6 +193,151 @@ def plan_one_shot(
         if return_vis_data:
             return None, None, None
         return None, None
+
+
+def _rotation_matrix_to_quaternion_xyzw(R):
+    """3x3 旋转矩阵 -> ROS 四元数 (x, y, z, w)。"""
+    R = np.asarray(R, dtype=float).reshape(3, 3)
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    if trace > 0:
+        s = 0.5 / sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+    n = sqrt(x*x + y*y + z*z + w*w)
+    if n > 1e-10:
+        x, y, z, w = x/n, y/n, z/n, w/n
+    return (float(x), float(y), float(z), float(w))
+
+
+def _matrix_4x4_to_pose_stamped(T, frame_id="base_link"):
+    """4x4 齐次变换矩阵 -> geometry_msgs/PoseStamped（base 系下目标末端位姿）。"""
+    T = np.asarray(T, dtype=float)
+    if T.shape != (4, 4):
+        T = np.asarray(T, dtype=float).reshape(4, 4)
+    pose = PoseStamped()
+    pose.header.frame_id = frame_id
+    pose.header.stamp = rospy.Time.now()
+    pose.pose.position.x = float(T[0, 3])
+    pose.pose.position.y = float(T[1, 3])
+    pose.pose.position.z = float(T[2, 3])
+    qx, qy, qz, qw = _rotation_matrix_to_quaternion_xyzw(T[0:3, 0:3])
+    pose.pose.orientation.x = qx
+    pose.pose.orientation.y = qy
+    pose.pose.orientation.z = qz
+    pose.pose.orientation.w = qw
+    return pose
+
+
+def _compute_ik_for_pose(pose_stamped, seed_joints=None, timeout=2.0):
+    """调用 /motion/compute_ik 由目标位姿求关节角，失败返回 None。"""
+    if not _HAS_COMPUTE_IK:
+        rospy.logwarn("[OneShot] 未找到 ComputeIK 服务定义，无法从 4x4 目标位姿求 IK")
+        return None
+    try:
+        rospy.wait_for_service("/motion/compute_ik", timeout=timeout)
+        ik = rospy.ServiceProxy("/motion/compute_ik", ComputeIK)
+        req = ComputeIK.Request()
+        req.target_pose = pose_stamped
+        if seed_joints is not None and len(seed_joints) >= 6:
+            from sensor_msgs.msg import JointState
+            req.seed_state = JointState()
+            req.seed_state.name = list(RRTStarPhase.JOINT_NAMES)
+            req.seed_state.position = list(seed_joints)[:6]
+        resp = ik(req)
+        if resp.success and getattr(resp.solution, "position", None) and len(resp.solution.position) >= 6:
+            return list(resp.solution.position[:6])
+    except (rospy.ROSException, rospy.ROSInterruptException, Exception) as e:
+        rospy.logwarn_throttle(5, "[OneShot] IK 服务调用失败: %s", str(e))
+    return None
+
+
+def plan_one_shot_from_goal_pose(
+    goal_pose_4x4,
+    start_xyz,
+    start_joints,
+    obstacles=None,
+    bounds=None,
+    frame_id="base_link",
+    aco_grid_res=0.08,
+    aco_n_ants=40,
+    aco_n_iters=30,
+    aco_greedy_prob=0.3,
+    aco_elite_deposit_ratio=2.0,
+    rrt_step_size=0.12,
+    rrt_max_iter=4000,
+    return_vis_data=False,
+    ee_half_extents=None,
+    seed_joints_for_ik=None,
+    ik_timeout=2.0,
+):
+    """
+    以「目标 4x4 笛卡尔矩阵（含目标点 + 旋转矩阵）」为目标的封装：先由 IK 求得 goal_joints，再调用 plan_one_shot。
+
+    Args:
+        goal_pose_4x4: 4x4 齐次变换矩阵（numpy 或 list），base 系下目标末端位姿。
+        start_xyz: [x, y, z] 起点笛卡尔位置（base_link）。
+        start_joints: 起点关节角 (6,)；由 /joint_states 获取。
+        obstacles: 障碍物列表；None 时使用 GAZEBO_DEFAULT_OBSTACLES。
+        bounds / frame_id / aco_* / rrt_* / return_vis_data / ee_half_extents: 同 plan_one_shot。
+        seed_joints_for_ik: 可选，IK 求解的种子关节角；None 时用 start_joints。
+        ik_timeout: 等待 /motion/compute_ik 的超时（秒）。
+
+    Returns:
+        与 plan_one_shot 相同：(path_joints, trajectory) 或 (path_joints, trajectory, vis_data)。
+    """
+    T = np.asarray(goal_pose_4x4, dtype=float)
+    if T.shape != (4, 4):
+        rospy.logerr("[OneShot] goal_pose_4x4 须为 4x4 矩阵")
+        if return_vis_data:
+            return None, None, None
+        return None, None
+    goal_xyz = [float(T[0, 3]), float(T[1, 3]), float(T[2, 3])]
+    pose_stamped = _matrix_4x4_to_pose_stamped(T, frame_id=frame_id)
+    seed = seed_joints_for_ik if seed_joints_for_ik is not None else start_joints
+    goal_joints = _compute_ik_for_pose(pose_stamped, seed_joints=seed, timeout=ik_timeout)
+    if goal_joints is None:
+        rospy.logerr("[OneShot] 无法从目标 4x4 位姿求得 IK，规划取消")
+        if return_vis_data:
+            return None, None, None
+        return None, None
+    return plan_one_shot(
+        start_xyz=start_xyz,
+        start_joints=start_joints,
+        goal_xyz=goal_xyz,
+        goal_joints=goal_joints,
+        obstacles=obstacles,
+        bounds=bounds,
+        frame_id=frame_id,
+        aco_grid_res=aco_grid_res,
+        aco_n_ants=aco_n_ants,
+        aco_n_iters=aco_n_iters,
+        aco_greedy_prob=aco_greedy_prob,
+        aco_elite_deposit_ratio=aco_elite_deposit_ratio,
+        rrt_step_size=rrt_step_size,
+        rrt_max_iter=rrt_max_iter,
+        return_vis_data=return_vis_data,
+        ee_half_extents=ee_half_extents,
+    )
 
 
 def joints_to_trajectory(path_joints, joint_names, time_step=0.5):
