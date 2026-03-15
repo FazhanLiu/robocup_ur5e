@@ -1,5 +1,4 @@
-version: '3.8'
-
+# version 已废弃，Docker Compose V2 不再需要
 services:
   # ============================================================================
   # RoboCup Brain (Suhang's Decision Node)
@@ -11,6 +10,8 @@ services:
     image: robocup_ur5e/brain:latest
     container_name: robocup_brain
     network_mode: "host"  # 最小化延迟
+    env_file:
+      - ./scripts/.env
     environment:
       - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
       - ROS_IP=${ROS_IP:-127.0.0.1}
@@ -18,6 +19,7 @@ services:
     volumes:
       - ./src/common_msgs:/workspace/src/common_msgs:ro
       - ./src/robocup_brain:/workspace/src/robocup_brain:ro
+      - ./src/motion_control:/workspace/src/motion_control:ro
       - ./scripts:/workspace/scripts:ro  # 系统脚本
       - /tmp/.X11-unix:/tmp/.X11-unix:rw  # GUI 支持
     restart: unless-stopped
@@ -152,6 +154,33 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # ============================================================================
+  # Path Planning (Sarvin & Chang - ACO+RRT* 混合规划)
+  # ============================================================================
+  path_planning:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.path_planning
+    image: robocup_ur5e/path_planning:latest
+    container_name: path_planning
+    network_mode: "host"
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
+      - ROS_IP=${ROS_IP:-127.0.0.1}
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - ./src/common_msgs:/workspace/src/common_msgs:ro
+      - ./src/path_planning:/workspace/src/path_planning:ro
+      - ./third_party/ros/universal_robot/ur_description:/workspace/src/ur_description:ro
+      - ./third_party/ros/robotiq/robotiq_description:/workspace/src/robotiq_description:ro
+      - ./scripts:/workspace/scripts:ro
+      - ./path_planning_viz:/workspace/viz_output:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     restart: unless-stopped
     stdin_open: true
     tty: true
