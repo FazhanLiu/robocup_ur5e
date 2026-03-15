@@ -218,3 +218,15 @@ rostopic echo /perception/yolo26_seg_cloud -n1
 "
 
 """
+
+
+"""
+或者可以启动rviz，查看点云，frame_id为camera_link
+cd /home/liufazhan/robocup_ur5e
+docker compose run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix perception_yolo_gpu_native bash -lc "
+source /opt/ros/noetic/setup.bash &&
+export ROS_MASTER_URI=http://127.0.0.1:11311 &&
+apt-get update -qq && apt-get install -y -qq ros-noetic-rviz > /dev/null 2>&1 || true &&
+rviz
+"
+"""
