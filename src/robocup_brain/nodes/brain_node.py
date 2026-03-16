@@ -334,7 +334,17 @@ def create_behavior_tree():
         ]
     )
     
-    return main_sequence
+
+    # 根节点：main() 的 tick 循环会不断重试，无需 Loop 装饰器
+    root = py_trees.composites.Selector(
+        name="TaskOrRecovery",
+        children=[
+            main_sequence,
+            # RecoveryBehavior() # 如果 MainTask 失败，走恢复逻辑
+        ]
+    )
+    return root
+
 
 # ... main() 函数保持不变 ...
 

@@ -1,0 +1,13 @@
+<launch>
+  <!-- 夹爪力控制 + 监控节点，需与 arm_gazebo 同一 ROS master -->
+  <arg name="gripper_action" default="/gripper_controller/gripper_cmd"/>
+  <arg name="max_effort" default="100.0"/>
+  <arg name="run_monitor" default="true"/>
+
+  <node name="gripper_control" pkg="motion_control" type="gripper_control_node.py" output="screen">
+    <param name="gripper_action" value="$(arg gripper_action)"/>
+    <param name="max_effort" value="$(arg max_effort)"/>
+  </node>
+
+  <node if="$(arg run_monitor)" name="gripper_monitor" pkg="motion_control" type="gripper_monitor_node.py" output="screen"/>
+</launch>
