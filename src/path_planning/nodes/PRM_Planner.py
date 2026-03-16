@@ -20,13 +20,33 @@ from std_srvs.srv import Trigger, TriggerResponse
 from std_msgs.msg import ColorRGBA
 from common_msgs.msg import (
     ObjectScore,
-    ExecuteTrajectoryAction,
     ExecuteTrajectoryGoal,
     ExecuteTrajectoryResult,
-    PlanExecutePoseAction,
+    ExecuteTrajectoryActionGoal,
+    ExecuteTrajectoryActionResult,
+    ExecuteTrajectoryActionFeedback,
+    PlanExecutePoseGoal,
     PlanExecutePoseResult,
     PlanExecutePoseFeedback,
+    PlanExecutePoseActionGoal,
+    PlanExecutePoseActionResult,
+    PlanExecutePoseActionFeedback,
 )
+
+
+# actionlib 用 type(a.action_goal) 取消息类，故需在实例上提供消息实例（不能是类属性）
+class _ExecuteTrajectoryActionSpec:
+    def __init__(self):
+        self.action_goal = ExecuteTrajectoryActionGoal()
+        self.action_result = ExecuteTrajectoryActionResult()
+        self.action_feedback = ExecuteTrajectoryActionFeedback()
+
+
+class _PlanExecutePoseActionSpec:
+    def __init__(self):
+        self.action_goal = PlanExecutePoseActionGoal()
+        self.action_result = PlanExecutePoseActionResult()
+        self.action_feedback = PlanExecutePoseActionFeedback()
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 from visualization_msgs.msg import Marker
 import actionlib_msgs.msg as action_msgs
@@ -189,11 +209,11 @@ class PRMPlannerNode:
         self.target_tf_timer = None
         self.motion_control_client = actionlib.SimpleActionClient(
             "/motion_control/execute_trajectory",
-            ExecuteTrajectoryAction,
+            _ExecuteTrajectoryActionSpec,
         )
         self.plan_execute_pose_server = actionlib.SimpleActionServer(
             "/path_planning/plan_execute_pose",
-            PlanExecutePoseAction,
+            _PlanExecutePoseActionSpec,
             execute_cb=self._execute_pose_action_cb,
             auto_start=False,
         )
