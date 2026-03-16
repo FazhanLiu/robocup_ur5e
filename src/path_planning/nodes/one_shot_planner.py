@@ -510,13 +510,8 @@ def plot_planning_result_3d(vis_data, output_path=None):
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-        # 中文显示：使用支持 GBK 的字体，避免图例/标题乱码
-        plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "SimSun", "KaiTi", "sans-serif"]
+        # 使用英文标签，避免 Docker/无中文字体环境下的 Glyph missing 警告；若需中文可安装中文字体并在此指定
         plt.rcParams["axes.unicode_minus"] = False
-        try:
-            plt.rcParams["font.family"] = "sans-serif"
-        except Exception:
-            pass
     except ImportError:
         rospy.logwarn("[OneShot] 3D 绘图需要 matplotlib，跳过")
         return False
@@ -541,7 +536,7 @@ def plot_planning_result_3d(vis_data, output_path=None):
         ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], "c-", linewidth=0.4, alpha=0.35)
         tree_drawn = True
     if tree_drawn:
-        ax.plot([], [], [], "c-", linewidth=0.8, alpha=0.5, label="RRT* 树")
+        ax.plot([], [], [], "c-", linewidth=0.8, alpha=0.5, label="RRT* tree")
 
     # ACO 多条候选路径（细绿线、半透明）
     for path_xyz in aco_all_paths_xyz:
@@ -549,7 +544,7 @@ def plot_planning_result_3d(vis_data, output_path=None):
             xs, ys, zs = zip(*path_xyz)
             ax.plot(xs, ys, zs, "g-", linewidth=0.5, alpha=0.25)
     if aco_all_paths_xyz:
-        ax.plot([], [], [], "g-", linewidth=1, alpha=0.5, label="ACO 候选路径")
+        ax.plot([], [], [], "g-", linewidth=1, alpha=0.5, label="ACO candidates")
 
     # 障碍物：每个 (center, half_extents) 画一个半透明立方体框
     for (cx, cy, cz), (hx, hy, hz) in obstacles:
@@ -573,24 +568,24 @@ def plot_planning_result_3d(vis_data, output_path=None):
     # ACO 最优路径（粗绿线）
     if aco_path_xyz and len(aco_path_xyz) >= 2:
         xs, ys, zs = zip(*aco_path_xyz)
-        ax.plot(xs, ys, zs, "g-", linewidth=2, alpha=0.95, label="ACO 最优路径")
+        ax.plot(xs, ys, zs, "g-", linewidth=2, alpha=0.95, label="ACO best")
 
     # RRT* 路径（即最终执行的关节路径在笛卡尔空间的投影）
     if rrt_path_xyz and len(rrt_path_xyz) >= 2:
         xs, ys, zs = zip(*rrt_path_xyz)
-        ax.plot(xs, ys, zs, "b-", linewidth=2.5, alpha=0.9, label="RRT* / 最终路径")
+        ax.plot(xs, ys, zs, "b-", linewidth=2.5, alpha=0.9, label="RRT* / final path")
 
     # 起点、终点
     if start_xyz and len(start_xyz) >= 3:
-        ax.scatter([start_xyz[0]], [start_xyz[1]], [start_xyz[2]], c="k", s=80, marker="^", label="起点")
+        ax.scatter([start_xyz[0]], [start_xyz[1]], [start_xyz[2]], c="k", s=80, marker="^", label="Start")
     if goal_xyz and len(goal_xyz) >= 3:
-        ax.scatter([goal_xyz[0]], [goal_xyz[1]], [goal_xyz[2]], c="orange", s=80, marker="o", label="目标点")
+        ax.scatter([goal_xyz[0]], [goal_xyz[1]], [goal_xyz[2]], c="orange", s=80, marker="o", label="Goal")
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
     ax.legend(loc="upper left", fontsize=8)
-    ax.set_title("规划结果 3D：障碍物 / ACO 候选与最优 / RRT* 树与最终路径")
+    ax.set_title("Planning 3D: obstacles / ACO & RRT* / final path")
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")

@@ -50,6 +50,8 @@ catkin_install_python(PROGRAMS
   nodes/Planner_Scene.py
   nodes/test_aco_rrtstar.py
   nodes/demo_one_shot_planning.py
+  nodes/pointcloud_target_removal.py
+  nodes/demo_one_shot_with_target_removal.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

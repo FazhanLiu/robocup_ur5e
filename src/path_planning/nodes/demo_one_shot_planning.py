@@ -220,14 +220,24 @@ def main():
         rospy.logerr("[Demo] 规划失败，退出")
         return
 
-    # 根据 ACO 路径、RRT* 路径、最终路径与点云障碍物绘制 3D 图并保存到 path_planning 包目录下
+    # 可选：发布轨迹 Marker 供 RViz 显示（由 one_shot_trajectory_display 模块实现）
+    try:
+        from one_shot_trajectory_display import publish_plan_markers
+        frame_id = rospy.get_param('~frame_id', 'base_link')
+        if rospy.get_param('~publish_plan_markers', True):
+            from visualization_msgs.msg import Marker
+            path_marker_pub = rospy.Publisher('~ee_path_marker', Marker, queue_size=1, latch=True)
+            target_marker_pub = rospy.Publisher('~target_marker', Marker, queue_size=1, latch=True)
+            status_marker_pub = rospy.Publisher('~status_marker', Marker, queue_size=1, latch=True)
+            rospy.sleep(0.2)
+            publish_plan_markers(path_marker_pub, target_marker_pub, status_marker_pub, vis_data, success=True, frame_id=frame_id)
+            rospy.loginfo("[Demo] 已发布轨迹 Marker：~ee_path_marker, ~target_marker, ~status_marker")
+    except Exception as e:
+        rospy.logdebug("[Demo] 轨迹显示未启用或模块不可用: %s", e)
+
+    # 根据 ACO 路径、RRT* 路径、最终路径与点云障碍物绘制 3D 图并保存（默认 /tmp，避免 Docker/只读环境下写包目录失败）
     if vis_data:
-        try:
-            import rospkg
-            default_viz = os.path.join(rospkg.RosPack().get_path("path_planning"), "planning_result_3d.png")
-        except Exception:
-            default_viz = "/tmp/planning_result_3d.png"
-        viz_path = rospy.get_param("~planning_viz_3d_output", default_viz)
+        viz_path = rospy.get_param("~planning_viz_3d_output", "/tmp/planning_result_3d.png")
         plot_planning_result_3d(vis_data, output_path=viz_path)
 
     # 与示教器一致：仅通过 /motion/command 发布 MotionCommand，相信 motion_control 执行
