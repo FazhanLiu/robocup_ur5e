@@ -191,6 +191,27 @@ path_joints, traj = plan_one_shot_grasped_object_to_goal(
 
 - Builds `MotionCommand` with `command_type=EXECUTE_TRAJECTORY`, `max_velocity=1.0`, `max_acceleration=1.0`, same as the teach pendant; can be published directly to `/motion/command`.
 
+#### 2.5 `build_obstacles_from_yolo_instance_cloud(instance_cloud, target_center_xyz, ...)`
+
+- Builds **environment obstacles only** from a YOLO instance-segmentation point cloud, while also returning the target object’s class and geometry information for grasping. Typical input is the instance cloud published by `yolo26_seg_xyzl_instance_cloud_node.py`:
+  - Point fields must at least contain `x, y, z, label` (all points of the same instance share the same `label`), and may later add a `class_id` field.
+  - `target_center_xyz` is the chosen/estimated **target object center** (same frame as the point cloud, usually `base_link`).
+
+- **Return value is a dict** with:
+
+  - `class_id`: YOLO class id of the target object (if a `class_id` field exists; otherwise `None`).
+  - `center`: Target object center `(cx, cy, cz)`, i.e. `target_center_xyz`.
+  - `half_extents`: Target object box half-extents `(hx, hy, hz)` looked up from `items_list.json` by `class_id` / `class_name`; falls back to `DEFAULT_GRASPED_OBJECT_HALF_EXTENTS` if not found.
+  - `obstacles`: list of **environment-only** obstacles `[((cx, cy, cz), (hx, hy, hz)), ...]`, with the target object itself **excluded**. This list can be passed directly as the `obstacles` argument to `plan_one_shot`.
+  - `env_cloud`: Environment point cloud (`PointCloud2` with x,y,z only), i.e. remaining points after removing the target instance; useful for visualization or further processing.
+
+- **Matching logic summary**:
+
+  1. Cluster points by `label` (instance id) and track the minimum distance from each instance to `target_center_xyz`;
+  2. Select the closest instance as the “target object”; if the minimum distance is still larger than `center_match_radius` (default 0.10 m), treat it as a failure and return `None`;
+  3. Read the target’s `class_id` (if available) and look up `half_extents` in `items_list.json`;
+  4. Remove all points of this instance from the cloud, and voxelize the remaining points into environment obstacles by calling `pointcloud_to_obstacles`.
+
 ---
 
 ### 3. demo_one_shot_planning
@@ -247,7 +268,51 @@ rosrun path_planning demo_one_shot_planning.py _end_effector_collision_box:="[0.
 
 ---
 
-### 4. Reusing one-shot planning in other nodes
+### 4. demo_one_shot_with_target_removal (removing target region using YOLO segmented clouds)
+
+`nodes/demo_one_shot_with_target_removal.py` is a demo that **removes the target object region in point clouds** before one-shot planning, with two input modes:
+
+- Mode A: raw depth cloud + semantic-segmentation cloud `/perception/yolo26_seg_cloud` (removes regions by `target_class_id`, using `pointcloud_target_removal.remove_target_region_from_pointcloud`).
+- Mode B: YOLO instance segmentation cloud `/perception/yolo26_seg_instance_cloud` (from `yolo26_seg_xyzl_instance_cloud_node.py`), combined with a target center `~target_center`, using `build_obstacles_from_yolo_instance_cloud` to detect the target instance and build environment obstacles.
+
+#### 4.1 Mode B: target selection and environment obstacles from instance cloud
+
+- Key parameters:
+  - `~instance_cloud_topic`: YOLO instance cloud topic (disabled by default), e.g. `/perception/yolo26_seg_instance_cloud`.
+  - `~target_center`: target object center (string or list), e.g. `"[0.35, 0.0, 0.2]"`, in `~frame_id` (default `base_link`).
+
+- The demo will:
+
+  1. Subscribe one `PointCloud2` frame from `~instance_cloud_topic` and transform it to `~frame_id` via TF;
+  2. Call `build_obstacles_from_yolo_instance_cloud(seg_instance_in_frame, target_center_xyz, ...)` to obtain:
+     - Target object `class_id`, `center`, and `half_extents`;
+     - Environment-only `obstacles` (voxelized from the cloud with the target instance removed);
+  3. Use the returned `obstacles` directly as the obstacle list for `plan_one_shot`;
+  4. If any step fails, automatically fall back to Mode A (class-based removal using `target_class_id`).
+
+- Example run:
+
+```bash
+rosrun path_planning demo_one_shot_with_target_removal.py \
+  _instance_cloud_topic:=/perception/yolo26_seg_instance_cloud \
+  _target_center:="[0.35, 0.0, 0.2]" \
+  _voxel_resolution:=0.05 \
+  _frame_id:=base_link
+```
+
+In this configuration:
+
+- The target object is **not treated as an obstacle** in collision checking (since it is the grasp / approach goal);
+- Other objects in the scene are voxelized into AABB obstacles and passed to `plan_one_shot` as usual.
+
+#### 4.2 Mode A: legacy behavior (class-id-based removal)
+
+- When `~instance_cloud_topic` or `~target_center` is not set, or Mode B fails:
+  - The demo falls back to the original behavior: subscribe raw cloud and semantic seg cloud, call `remove_target_region_from_pointcloud` with `target_class_id` to cut out that class, then voxelize the remaining points with `pointcloud_to_obstacles`.
+
+---
+
+### 5. Reusing one-shot planning in other nodes
 
 Same pattern as the teach pendant: no direct IK/FK; use TF, `/joint_states`, and config, and talk to motion_control via `MotionCommand`.
 

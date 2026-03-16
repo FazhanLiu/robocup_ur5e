@@ -191,6 +191,27 @@ path_joints, traj = plan_one_shot_grasped_object_to_goal(
 
 - 构造 `MotionCommand`，`command_type=EXECUTE_TRAJECTORY`，`max_velocity=1.0`，`max_acceleration=1.0`，与示教器发布方式一致，可直接发布到 `/motion/command`。
 
+#### 2.5 `build_obstacles_from_yolo_instance_cloud(instance_cloud, target_center_xyz, ...)`
+
+- 基于 YOLO 分割实例点云构造一次性规划可用的**环境障碍物**，同时返回目标物体的类别与几何信息，便于抓取阶段使用。典型输入为 `yolo26_seg_xyzl_instance_cloud_node.py` 发布的实例点云：
+  - 点云字段至少包含：`x, y, z, label`（同一实例的点 label 一致），后续可扩展加入 `class_id` 字段。
+  - `target_center_xyz` 为上层估计/选择的**目标物体中心点**（与点云同一坐标系，一般为 `base_link`）。
+
+- **返回值为 dict**，主要字段：
+
+  - `class_id`：目标物体的 YOLO 类别 id（若点云中存在 `class_id` 字段，否则为 `None`）。
+  - `center`：目标物体中心点 `(cx, cy, cz)`，即传入的 `target_center_xyz`。
+  - `half_extents`：目标物体的包围盒半轴 `(hx, hy, hz)`，通过 `items_list.json` 中的 `class_id` / `class_name` 查表；若查不到则使用 `DEFAULT_GRASPED_OBJECT_HALF_EXTENTS` 作为兜底。
+  - `obstacles`：仅包含**环境障碍物**的列表 `[((cx, cy, cz), (hx, hy, hz)), ...]`，不含目标物体本身。可直接传给 `plan_one_shot` 的 `obstacles` 参数。
+  - `env_cloud`：环境点云（`PointCloud2`，仅含 x,y,z），为去除目标实例点之后的剩余点云；可用于可视化或进一步处理。
+
+- **匹配逻辑摘要**：
+
+  1. 按 `label` 将实例点云聚类，统计每个实例到 `target_center_xyz` 的最近点距离；
+  2. 距离最近的实例视为“目标物体”；若最近距离仍大于阈值（`center_match_radius`，默认 0.10 m），则视为匹配失败，函数返回 `None`；
+  3. 从该实例的点中读取 `class_id`（若存在字段），并通过 `items_list.json` 查找对应的 `half_extents`；
+  4. 将该实例的全部点从点云中剔除，其余点体素化为环境障碍物（调用现有的 `pointcloud_to_obstacles`）。
+
 ---
 
 ### 3. demo_one_shot_planning 使用说明
@@ -247,7 +268,51 @@ rosrun path_planning demo_one_shot_planning.py _end_effector_collision_box:="[0.
 
 ---
 
-### 4. 在其他节点中复用一次性规划
+### 4. demo_one_shot_with_target_removal（基于 YOLO 分割点云挖去目标区域）
+
+`nodes/demo_one_shot_with_target_removal.py` 是在一次性规划前**挖掉指定目标物体点云**的 Demo，支持两种来源：
+
+- 方式 A：原始深度点云 + 语义分割点云 `/perception/yolo26_seg_cloud`（通过 `target_class_id` 按类别挖空，使用 `pointcloud_target_removal.remove_target_region_from_pointcloud`）。
+- 方式 B：YOLO 实例分割点云 `/perception/yolo26_seg_instance_cloud`（由 `yolo26_seg_xyzl_instance_cloud_node.py` 发布），结合目标中心点 `~target_center`，通过 `build_obstacles_from_yolo_instance_cloud` 自动识别目标物体并构造环境障碍物。
+
+#### 4.1 方式 B：基于实例点云的目标选择与环境障碍物构造
+
+- 关键参数：
+  - `~instance_cloud_topic`：YOLO 实例点云话题，默认不启用；例如 `/perception/yolo26_seg_instance_cloud`。
+  - `~target_center`：目标物体中心点（字符串或列表形式），例如 `"[0.35, 0.0, 0.2]"`，在 `~frame_id`（默认 `base_link`）下。
+
+- Demo 会：
+
+  1. 从 `~instance_cloud_topic` 订阅一帧 `PointCloud2`，并通过 TF 变换到 `~frame_id`；
+  2. 调用 `build_obstacles_from_yolo_instance_cloud(seg_instance_in_frame, target_center_xyz, ...)`，得到：
+     - 目标物体的 `class_id`、`center`、`half_extents`；
+     - 仅包含环境部分的 `obstacles`（去掉目标实例后的体素化结果）；
+  3. 使用返回的 `obstacles` 直接作为 `plan_one_shot` 的障碍物列表；
+  4. 若匹配或点云获取失败，则自动回退到方式 A（基于 `target_class_id` 的类别挖空）。
+
+- 运行示例：
+
+```bash
+rosrun path_planning demo_one_shot_with_target_removal.py \
+  _instance_cloud_topic:=/perception/yolo26_seg_instance_cloud \
+  _target_center:="[0.35, 0.0, 0.2]" \
+  _voxel_resolution:=0.05 \
+  _frame_id:=base_link
+```
+
+此时：
+
+- 目标物体**不再当作障碍**参与碰撞检测（因为它本来就是末端要到达/抓取的目标），只用作抓取参数和逻辑决策；
+- 环境中其它物体通过点云体素化转为 AABB，作为 `plan_one_shot` 的障碍物输入。
+
+#### 4.2 方式 A：兼容旧逻辑（基于 target_class_id 的点云挖空）
+
+- 若未设置 `~instance_cloud_topic` 或 `~target_center`，或方式 B 失败：
+  - Demo 会回退到原来的流程：订阅原始点云与语义分割点云，调用 `remove_target_region_from_pointcloud` 按 `target_class_id` 挖掉一类物体，再用 `pointcloud_to_obstacles` 将剩余点云体素化为障碍物。
+
+---
+
+### 5. 在其他节点中复用一次性规划
 
 与示教器相同用法：不直接使用 IK/FK，只使用 TF、`/joint_states` 和配置，并通过 `MotionCommand` 与 motion_control 交互。
 

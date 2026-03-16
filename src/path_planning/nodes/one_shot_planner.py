@@ -18,6 +18,7 @@ from __future__ import division
 
 import sys
 import os
+import json
 from math import sqrt
 
 # 保证可导入同目录下的 aco_rrtstar_planner_node
@@ -29,6 +30,8 @@ import numpy as np
 import rospy
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from geometry_msgs.msg import PoseStamped, Point, Quaternion
+from sensor_msgs.msg import PointCloud2, PointField
+import sensor_msgs.point_cloud2 as pc2
 from common_msgs.msg import MotionCommand
 
 try:
@@ -50,6 +53,238 @@ from aco_rrtstar_planner_node import (
 
 # 不传 ee_to_object_4x4 时使用的默认夹持物体包围盒半长（EE 系，米）
 DEFAULT_GRASPED_OBJECT_HALF_EXTENTS = (0.02, 0.02, 0.03)
+
+# items_list.json 默认路径（config 相对于 path_planning 包根目录）
+_PKG_DIR = os.path.dirname(_SCRIPT_DIR)
+DEFAULT_ITEMS_LIST_JSON = os.path.join(_PKG_DIR, "config", "items_list.json")
+
+
+def _load_items_list_json(items_list_path=None):
+    """
+    读取 items_list.json，成功返回 dict，否则返回 None。
+    单独封装，供按 class_name / class_id 等多种方式索引。
+    """
+    path = items_list_path or DEFAULT_ITEMS_LIST_JSON
+    if not os.path.isfile(path):
+        if rospy.get_logger().getEffectiveLevel() <= rospy.logging.DEBUG:
+            rospy.logdebug("[OneShot] items_list 不存在: %s", path)
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        rospy.logwarn_throttle(5, "[OneShot] 读取 items_list.json 失败: %s", str(e))
+        return None
+
+
+def _get_half_extents_by_class_name(class_name, items_list_path=None):
+    """
+    从 items_list.json 中按 class_name 查找模型，返回 half_extents (hx, hy, hz)。
+    若未找到或文件不存在，返回 None。
+    """
+    data = _load_items_list_json(items_list_path)
+    if data is None:
+        return None
+    models = data.get("models") if isinstance(data, dict) else None
+    if not models:
+        return None
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        if m.get("class_name") == class_name and "half_extents" in m:
+            he = m["half_extents"]
+            if isinstance(he, (list, tuple)) and len(he) >= 3:
+                return tuple(float(x) for x in he[:3])
+            break
+    return None
+
+
+def _get_half_extents_by_class_id(class_id, items_list_path=None):
+    """
+    从 items_list.json 中按 class_id 查找模型，返回 half_extents (hx, hy, hz)。
+    若未找到或文件不存在，返回 None。
+    """
+    data = _load_items_list_json(items_list_path)
+    if data is None:
+        return None
+    models = data.get("models") if isinstance(data, dict) else None
+    if not models:
+        return None
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        if m.get("class_id") == class_id and "half_extents" in m:
+            he = m["half_extents"]
+            if isinstance(he, (list, tuple)) and len(he) >= 3:
+                return tuple(float(x) for x in he[:3])
+            break
+    return None
+
+
+def build_obstacles_from_yolo_instance_cloud(
+    instance_cloud,
+    target_center_xyz,
+    items_list_path=None,
+    voxel_res=0.05,
+    bounds=None,
+    instance_label_field="label",
+    class_id_field="class_id",
+    center_match_radius=0.10,
+    include_target_obstacle=True,
+):
+    """
+    从 YOLO 分割实例点云构造一次性规划可用的障碍物列表。
+
+    假定点云来自 yolo26_seg_xyzl_instance_cloud_node，后续可能扩展字段：
+      - x, y, z: 点在规划坐标系（如 base_link）下的位置
+      - label:   uint32，实例 ID（同一物体所有点一致），字段名默认 "label"
+      - class_id: int32，可选，物体类别 id（同一物体所有点一致），字段名默认 "class_id"
+
+    逻辑：
+      1) 根据输入的目标中心点 target_center_xyz，在所有 label 中找到“最近”的实例 ID；
+      2) 读取该实例的 class_id（若有），在 items_list.json 中查找 half_extents；
+         - 命中：使用配置的 half_extents 作为该物体的包围盒半轴；
+         - 未命中或无 class_id：使用 DEFAULT_GRASPED_OBJECT_HALF_EXTENTS 兜底；
+      3) 将该物体构造成一个 AABB 障碍物 ((cx, cy, cz), (hx, hy, hz))，按需加入返回列表；
+      4) 从全局点云中过滤掉该 label 对应的所有点（若 include_target_obstacle=True 则保留其几何信息），其余点构成“环境点云”，
+         使用 pointcloud_to_obstacles 体素化为普通障碍物并追加到返回列表。
+
+    Args:
+        instance_cloud: sensor_msgs/PointCloud2，需包含至少 x,y,z,label。
+        target_center_xyz: [x,y,z]，目标物体中心在同一坐标系下的位置。
+        items_list_path: 可选，items_list.json 的路径；None 时使用默认路径。
+        voxel_res: 体素大小（米），用于环境点云 -> 障碍物体素化。
+        bounds: 工作空间边界 ((xmin,xmax),(ymin,ymax),(zmin,zmax))；None 时使用 ACO/RRT* 默认值。
+        instance_label_field: 实例 ID 字段名，默认 "label"。
+        class_id_field: 类别 ID 字段名，默认 "class_id"；不存在时自动忽略。
+        center_match_radius: 若所有实例到目标中心的最近距离都大于该值（米），视为匹配失败。
+        include_target_obstacle: 若为 True，则把目标物体自身 AABB 也视作障碍物加入列表；
+                                 若为 False，则仅返回环境障碍物（适合“目标是吸引点、而非障碍”的抓取场景）。
+
+    Returns:
+        dict，字段包括：
+            - 'class_id':  目标物体的类别 id（若存在，否则为 None）
+            - 'center':    目标物体中心点 (cx, cy, cz)（即 target_center_xyz）
+            - 'half_extents':  (hx, hy, hz) 目标物体的半轴（items_list 查表或默认值）
+            - 'obstacles': list[((cx,cy,cz),(hx,hy,hz))]，仅包含环境障碍物（不含目标物体自身）
+            - 'env_cloud': sensor_msgs/PointCloud2，环境点云（仅 x,y,z），若无则为 None
+
+        匹配失败或输入异常时返回 None。
+    """
+    if instance_cloud is None or not isinstance(instance_cloud, PointCloud2):
+        rospy.logerr("[OneShot] build_obstacles_from_yolo_instance_cloud: instance_cloud 无效")
+        return None
+
+    try:
+        tc = [float(target_center_xyz[0]), float(target_center_xyz[1]), float(target_center_xyz[2])]
+    except Exception:
+        rospy.logerr("[OneShot] build_obstacles_from_yolo_instance_cloud: target_center_xyz 无效: %r", target_center_xyz)
+        return None
+
+    field_names = [f.name for f in instance_cloud.fields]
+    has_label = instance_label_field in field_names
+    has_class_id = class_id_field in field_names
+    if not has_label:
+        rospy.logerr("[OneShot] YOLO 实例点云中找不到 label 字段(%s)，无法按实例聚合", instance_label_field)
+        return None
+
+    # 1) 按 label 聚合点，并统计每个 label 到目标中心的最小距离 & class_id
+    label_to_points = {}
+    label_to_min_dist2 = {}
+    label_to_class_id = {}
+
+    read_fields = ["x", "y", "z", instance_label_field]
+    if has_class_id and class_id_field not in read_fields:
+        read_fields.append(class_id_field)
+
+    for p in pc2.read_points(instance_cloud, skip_nans=True, field_names=read_fields):
+        x, y, z = float(p[0]), float(p[1]), float(p[2])
+        label_val = int(p[3])
+        label_to_points.setdefault(label_val, []).append((x, y, z))
+        dx, dy, dz = x - tc[0], y - tc[1], z - tc[2]
+        d2 = dx * dx + dy * dy + dz * dz
+        prev = label_to_min_dist2.get(label_val)
+        label_to_min_dist2[label_val] = d2 if prev is None or d2 < prev else prev
+        if has_class_id and len(p) >= 5:
+            try:
+                label_to_class_id[label_val] = int(p[4])
+            except Exception:
+                pass
+
+    if not label_to_points:
+        rospy.logwarn("[OneShot] YOLO 实例点云为空，无法构建障碍物")
+        return []
+
+    # 选择到目标中心最近的实例 ID
+    best_label = None
+    best_dist2 = None
+    for lbl, d2 in label_to_min_dist2.items():
+        if best_dist2 is None or d2 < best_dist2:
+            best_label = lbl
+            best_dist2 = d2
+
+    if best_label is None:
+        rospy.logwarn("[OneShot] 未能从实例点云中匹配目标物体")
+        return []
+
+    if best_dist2 is None or best_dist2 > center_match_radius * center_match_radius:
+        rospy.logwarn(
+            "[OneShot] 最近实例与目标中心距离为 %.3f m，大于阈值 %.3f，放弃匹配",
+            sqrt(best_dist2) if best_dist2 is not None else -1.0,
+            center_match_radius,
+        )
+        return []
+
+    # 2) 目标物体包围盒：中心使用传入的 target_center_xyz，半轴根据 class_id / items_list 确定
+    class_id = label_to_class_id.get(best_label) if has_class_id else None
+    half_extents = None
+    if class_id is not None:
+        half_extents = _get_half_extents_by_class_id(class_id, items_list_path)
+        if half_extents is None:
+            class_name = f"class_{class_id}"
+            half_extents = _get_half_extents_by_class_name(class_name, items_list_path)
+    if half_extents is None:
+        half_extents = DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
+        if class_id is not None:
+            rospy.logwarn_throttle(
+                5,
+                "[OneShot] class_id=%s 在 items_list 中未找到 half_extents，使用默认 %s",
+                class_id,
+                half_extents,
+            )
+
+    obstacles = []
+
+    # 3) 环境障碍物：将除目标实例以外的所有点体素化
+    other_points = []
+    for lbl, pts in label_to_points.items():
+        if lbl == best_label:
+            continue
+        other_points.extend(pts)
+
+    env_cloud = None
+    if other_points:
+        header = instance_cloud.header
+        # pointcloud_to_obstacles 只需要 x,y,z，因此这里仅创建 XYZ 点云
+        env_cloud = pc2.create_cloud_xyz32(header, other_points)
+        from aco_rrtstar_planner_node import pointcloud_to_obstacles
+
+        env_obstacles = pointcloud_to_obstacles(
+            env_cloud,
+            voxel_res=voxel_res,
+            frame_id=header.frame_id or "base_link",
+            bounds=bounds,
+        )
+        obstacles.extend(env_obstacles)
+
+    result = {
+        "class_id": class_id,
+        "center": (tc[0], tc[1], tc[2]),
+        "half_extents": tuple(float(x) for x in half_extents[:3]),
+        "obstacles": obstacles,
+        "env_cloud": env_cloud,
+    }
+    return result
 
 # 默认虚拟抓取点：与 planning_config.yaml 一致，Gazebo 箱体后方
 def get_default_virtual_grasp_point():
@@ -378,6 +613,7 @@ def plan_one_shot_grasped_object_to_goal(
     start_xyz,
     start_joints,
     ee_to_object_4x4=None,
+    class_name=None,
     obstacles=None,
     bounds=None,
     frame_id="base_link",
@@ -391,6 +627,7 @@ def plan_one_shot_grasped_object_to_goal(
     return_vis_data=False,
     ee_half_extents=None,
     grasped_object_half_extents=None,
+    items_list_path=None,
     seed_joints_for_ik=None,
     ik_timeout=2.0,
 ):
@@ -403,9 +640,11 @@ def plan_one_shot_grasped_object_to_goal(
         start_xyz: [x, y, z] 起点笛卡尔位置（base_link）。
         start_joints: 起点关节角 (6,)。
         ee_to_object_4x4: 可选。4x4 齐次变换（末端系→物体系），夹持时物体在末端系下的位姿；物体中心在 EE 系下为 T[0:3, 3]。为 None 时不换算，object_goal_4x4 即末端目标。
+        class_name: 可选。物品类别名（与 items_list.json 中 class_name 一致，如 "class_0"）。传入时从 config/items_list.json 索引该物体的 half_extents，不再依赖 grasped_object_half_extents。
         obstacles / bounds / frame_id / aco_* / rrt_* / return_vis_data: 同 plan_one_shot_from_goal_pose。
         ee_half_extents: 末端包围盒半长 (hx, hy, hz)；None 时从 ~end_effector_collision_box 读取。
-        grasped_object_half_extents: 夹持物体在 EE 系下的包围盒半长 (ox, oy, oz)。ee_to_object_4x4 非 None 时仅此时参与合并；ee_to_object_4x4 为 None 时用该默认物体参与合并（假定物体中心在 EE 原点），未传时用 DEFAULT_GRASPED_OBJECT_HALF_EXTENTS。
+        grasped_object_half_extents: 夹持物体在 EE 系下的包围盒半长 (ox, oy, oz)。当未传 class_name 时使用；传了 class_name 时由 items_list 覆盖，此参数可省略。
+        items_list_path: 可选。items_list.json 路径；None 时使用 path_planning/config/items_list.json。
         seed_joints_for_ik: IK 种子关节角；None 时用 start_joints。
         ik_timeout: 等待 /motion/compute_ik 的超时（秒）。
 
@@ -431,12 +670,24 @@ def plan_one_shot_grasped_object_to_goal(
     else:
         ee_half_extents = tuple(float(x) for x in ee_half_extents[:3])
 
-    if ee_to_object_4x4 is not None and grasped_object_half_extents is not None and any(x > 0 for x in grasped_object_half_extents):
+    # 夹持物体半轴：优先用 class_name 从 items_list.json 索引，否则用传入的 grasped_object_half_extents 或默认值
+    if class_name is not None:
+        looked_up = _get_half_extents_by_class_name(class_name, items_list_path)
+        if looked_up is not None:
+            grasped_object_half_extents = looked_up
+        elif grasped_object_half_extents is None:
+            grasped_object_half_extents = DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
+            rospy.logwarn_throttle(5, "[OneShot] class_name=%s 在 items_list 中未找到 half_extents，使用默认", class_name)
+        # else: class_name 未命中但调用方传了 grasped_object_half_extents，保留 grasped_object_half_extents
+    if grasped_object_half_extents is not None and not any(x > 0 for x in grasped_object_half_extents):
+        grasped_object_half_extents = None
+
+    if ee_to_object_4x4 is not None and grasped_object_half_extents is not None:
         grasped_object_half_extents = tuple(float(x) for x in grasped_object_half_extents[:3])
         ee_half_extents = _merge_ee_object_half_extents(ee_half_extents, ee_to_object_4x4, grasped_object_half_extents)
     elif ee_to_object_4x4 is None:
         obj_half = DEFAULT_GRASPED_OBJECT_HALF_EXTENTS
-        if grasped_object_half_extents is not None and any(x > 0 for x in grasped_object_half_extents):
+        if grasped_object_half_extents is not None:
             obj_half = tuple(float(x) for x in grasped_object_half_extents[:3])
         ee_half_extents = _merge_ee_object_half_extents(ee_half_extents, np.eye(4), obj_half)
 
