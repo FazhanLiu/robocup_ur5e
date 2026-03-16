@@ -40,7 +40,7 @@ class Yolo26SegXYZLInstanceCloudNode:
         rospy.init_node("yolo26_seg_xyzl_instance_cloud", anonymous=False)
 
         self.bridge = CvBridge()
-        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/yolo26m-seg.pt")
+        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/best.pt")
         self.conf_threshold = float(rospy.get_param("~confidence_threshold", 0.5))
         self.max_points_per_obj = int(rospy.get_param("~max_points_per_obj", 3000))
         self.sync_queue_size = int(rospy.get_param("~sync_queue_size", 10))
