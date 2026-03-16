@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.0.2)
 project(motion_control)
 
 find_package(catkin REQUIRED COMPONENTS
+  actionlib
+  actionlib_msgs
   rospy
   std_msgs
   std_srvs
@@ -16,6 +18,8 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   CATKIN_DEPENDS
+    actionlib
+    actionlib_msgs
     rospy
     std_msgs
     std_srvs
