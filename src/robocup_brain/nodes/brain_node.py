@@ -3,7 +3,7 @@
 RoboCup Brain Node - behavior-tree based task orchestration.
 
 Current pick flow:
-  1. Move to HOME once.
+  1. Move to the overview joint pose once.
   2. Open gripper once.
   3. Pick the best YOLO target that is not blacklisted.
   4. Build a direct grasp pose from YOLO 3D position.
@@ -106,6 +106,38 @@ def build_target_key(label, point_base):
     )
 
 
+def normalize_label(label):
+    return str(label).strip().lower()
+
+
+def rotate_vector_by_quaternion(quat, vector):
+    x = quat.x
+    y = quat.y
+    z = quat.z
+    w = quat.w
+    norm = (x * x + y * y + z * z + w * w) ** 0.5
+    if norm < 1e-9:
+        x, y, z, w = 0.0, 0.0, 0.0, 1.0
+    else:
+        x /= norm
+        y /= norm
+        z /= norm
+        w /= norm
+
+    vx = vector[0]
+    vy = vector[1]
+    vz = vector[2]
+
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+
+    rx = vx + w * tx + (y * tz - z * ty)
+    ry = vy + w * ty + (z * tx - x * tz)
+    rz = vz + w * tz + (x * ty - y * tx)
+    return rx, ry, rz
+
+
 def blacklist_current_target(reason):
     blackboard = get_blackboard()
     target_key = blackboard_get("target_key")
@@ -131,7 +163,7 @@ def blacklist_current_target(reason):
 
 
 class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
-    """Move to HOME once, then open the gripper once."""
+    """Move to the fixed overview joint pose once, then open the gripper once."""
 
     def __init__(self, name="MoveToOverview"):
         super().__init__(name)
@@ -151,6 +183,7 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
             latch=True,
         )
         self.gripper_release_srv = rospy.ServiceProxy("/gripper/release", Trigger)
+        self.clear_target_pose_srv = rospy.ServiceProxy("/path_planning/clear_target_pose", Trigger)
         self.command_sent = False
         self.last_result = None
         self.release_done = False
@@ -167,15 +200,33 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
         log_stage("MoveToOverview")
         self.yolo_enable_pub.publish(Bool(data=False))
         rospy.loginfo("[Brain] Stage action: disable YOLO perception")
+        self._clear_path_planning_target_pose()
+
+    def _clear_path_planning_target_pose(self):
+        try:
+            rospy.wait_for_service("/path_planning/clear_target_pose", timeout=0.5)
+            response = self.clear_target_pose_srv()
+            if response.success:
+                rospy.loginfo("[Brain] Stage action: cleared stale prm_target_pose")
+            else:
+                rospy.logwarn(
+                    "[Brain] Failed to clear prm_target_pose before detection: %s",
+                    response.message,
+                )
+        except (rospy.ROSException, rospy.ServiceException):
+            rospy.logwarn_throttle(
+                5.0,
+                "[Brain] /path_planning/clear_target_pose unavailable; continuing without clearing target pose",
+            )
 
     def _open_gripper(self):
         try:
             rospy.wait_for_service("/gripper/release", timeout=0.5)
             response = self.gripper_release_srv()
             if response.success:
-                rospy.loginfo("[Brain] Stage action: open gripper after HOME")
+                rospy.loginfo("[Brain] Stage action: open gripper at poseToTakePics")
                 return True
-            rospy.logerr("[Brain] Failed to open gripper after HOME: %s", response.message)
+            rospy.logerr("[Brain] Failed to open gripper at poseToTakePics: %s", response.message)
             return False
         except (rospy.ROSException, rospy.ServiceException):
             if self.gripper_cmd_pub.get_num_connections() > 0:
@@ -197,12 +248,18 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
 
         if not self.command_sent:
             clear_terminal_failure()
+            overview_joints = [-0.0278, -0.0011, 0.0000, -0.3441, 0.0140, -0.0034]
             cmd = MotionCommand()
-            cmd.command_type = MotionCommand.HOME
+            cmd.command_type = MotionCommand.MOVE_TO_JOINT
+            cmd.joint_positions = overview_joints
             cmd.max_velocity = 1.0
             cmd.max_acceleration = 1.0
             cmd.collision_check = True
             self.motion_cmd_pub.publish(cmd)
+            rospy.loginfo(
+                "[Brain] Stage action: move to overview joints [%s]",
+                ", ".join(f"{joint:.4f}" for joint in overview_joints),
+            )
             self.command_sent = True
             return Status.RUNNING
 
@@ -210,14 +267,14 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
             return Status.RUNNING
 
         if self.last_result.status != GraspResult.SUCCESS:
-            reason = self.last_result.message or "HOME motion failed"
+            reason = self.last_result.message or "poseToTakePics motion failed"
             rospy.logerr("[Brain] Overview move failed: %s", reason)
             set_terminal_failure(reason)
             return Status.FAILURE
 
         if not self.release_done:
             if not self._open_gripper():
-                reason = "Failed to open gripper after HOME"
+                reason = "Failed to open gripper at poseToTakePics"
                 set_terminal_failure(reason)
                 return Status.FAILURE
             self.release_done = True
@@ -246,6 +303,12 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         self.yolo_enable_pub = rospy.Publisher(
             self.yolo_enable_topic,
             Bool,
+            queue_size=1,
+            latch=True,
+        )
+        self.target_pose_preview_pub = rospy.Publisher(
+            "/path_planning/target_pose_preview",
+            PoseStamped,
             queue_size=1,
             latch=True,
         )
@@ -289,6 +352,7 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
 
     def _score_object(self, obj_label):
         score_map = {
+            "cube": 1000,
             "green_cube": 100,
             "purple_cube": 100,
             "red_can": 80,
@@ -298,7 +362,20 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
             "green_can": 40,
             "blue_bottle": 40,
         }
-        return score_map.get(str(obj_label).lower(), 1)
+        return score_map.get(normalize_label(obj_label), 1)
+
+    def _canonical_label(self, obj_label):
+        label = normalize_label(obj_label)
+        cube_aliases = {
+            normalize_label(item)
+            for item in rospy.get_param(
+                "~cube_class_labels",
+                ["class_1", "class_3", "class_5", "class_7"],
+            )
+        }
+        if label in cube_aliases:
+            return "cube"
+        return label
 
     def initialise(self):
         self.mock_done = False
@@ -349,6 +426,7 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
             return Status.RUNNING
 
         failed_target_keys = get_failed_target_keys()
+        preferred_label = normalize_label(rospy.get_param("~preferred_target_label", "cube"))
         frame_id = self.latest_frame_id or rospy.get_param(
             "~perception_frame_id", "camera_rgb_optical_frame"
         )
@@ -391,12 +469,15 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
 
             pt_base = tf2_geometry_msgs.do_transform_point(pt_camera, trans)
             label = str(obj.get("name", "unknown"))
+            canonical_label = self._canonical_label(label)
+            if preferred_label and canonical_label != preferred_label:
+                continue
             target_key = build_target_key(label, pt_base)
             if target_key in failed_target_keys:
                 continue
 
             confidence = float(obj.get("confidence", 0.0))
-            score = self._score_object(label)
+            score = self._score_object(canonical_label)
             if score > highest_score or (
                 score == highest_score and confidence > highest_confidence
             ):
@@ -407,12 +488,21 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
                 best_target_key = target_key
 
         if best_target is None:
-            rospy.logwarn_throttle(
-                2.0,
-                "[Brain] No selectable YOLO target right now | labels=%s blacklisted=%d",
-                ", ".join(latest_labels),
-                len(failed_target_keys),
-            )
+            if preferred_label:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "[Brain] Waiting for preferred target '%s' | visible=%s blacklisted=%d",
+                    preferred_label,
+                    ", ".join(latest_labels),
+                    len(failed_target_keys),
+                )
+            else:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "[Brain] No selectable YOLO target right now | labels=%s blacklisted=%d",
+                    ", ".join(latest_labels),
+                    len(failed_target_keys),
+                )
             return Status.RUNNING
 
         clear_terminal_failure()
@@ -422,13 +512,39 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         blackboard.set("target_key", best_target_key)
         blackboard.set("target_score", highest_score)
         blackboard.set("target_confidence", highest_confidence)
+        selected_label = str(best_target.get("name", "unknown"))
+        selected_canonical_label = self._canonical_label(selected_label)
+
+        preview_pose = PoseStamped()
+        preview_pose.header.frame_id = "base_link"
+        preview_pose.header.stamp = rospy.Time.now()
+        preview_roll = float(rospy.get_param("~direct_grasp_roll", 3.141592653589793))
+        preview_pitch = float(rospy.get_param("~direct_grasp_pitch", 1.5707963267948966))
+        preview_yaw = float(rospy.get_param("~direct_grasp_yaw", 0.0))
+        qx, qy, qz, qw = quaternion_from_euler(preview_roll, preview_pitch, preview_yaw)
+        preview_pose.pose.orientation = Quaternion(qx, qy, qz, qw)
+        preview_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.14))
+        preview_dx, preview_dy, preview_dz = rotate_vector_by_quaternion(
+            preview_pose.pose.orientation,
+            (preview_local_x_offset, 0.0, 0.0),
+        )
+        preview_pose.pose.position.x = float(best_point_base.point.x) + preview_dx
+        preview_pose.pose.position.y = float(best_point_base.point.y) + preview_dy
+        preview_pose.pose.position.z = float(best_point_base.point.z) + preview_dz
+        self.target_pose_preview_pub.publish(preview_pose)
+
         self.yolo_enable_pub.publish(Bool(data=False))
         rospy.loginfo("[Brain] Stage action: disable YOLO perception")
         rospy.loginfo(
-            "[Brain] Stage complete: EvaluateTargets | selected=%s score=%s confidence=%.3f",
-            best_target.get("name", "unknown"),
+            "[Brain] Stage complete: EvaluateTargets | selected=%s semantic=%s score=%s confidence=%.3f preview=(%.3f, %.3f, %.3f) local_x_offset=%.3f",
+            selected_label,
+            selected_canonical_label,
             highest_score,
             highest_confidence,
+            preview_pose.pose.position.x,
+            preview_pose.pose.position.y,
+            preview_pose.pose.position.z,
+            preview_local_x_offset,
         )
         return Status.SUCCESS
 
@@ -474,24 +590,30 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
 
         grasp_offset_x = float(rospy.get_param("~direct_grasp_offset_x", 0.0))
         grasp_offset_y = float(rospy.get_param("~direct_grasp_offset_y", 0.0))
-        grasp_offset_z = float(rospy.get_param("~direct_grasp_offset_z", 0.02))
+        grasp_offset_z = float(rospy.get_param("~direct_grasp_offset_z", 0.0))
+        grasp_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.14))
         grasp_min_z = float(rospy.get_param("~direct_grasp_min_z", 0.05))
         grasp_max_z = float(rospy.get_param("~direct_grasp_max_z", 1.20))
         grasp_roll = float(rospy.get_param("~direct_grasp_roll", 3.141592653589793))
-        grasp_pitch = float(rospy.get_param("~direct_grasp_pitch", 0.0))
+        grasp_pitch = float(rospy.get_param("~direct_grasp_pitch", 1.5707963267948966))
         grasp_yaw = float(rospy.get_param("~direct_grasp_yaw", 0.0))
 
         raw_z = float(target_point.point.z) + grasp_offset_z
         clamped_z = max(grasp_min_z, min(grasp_max_z, raw_z))
         qx, qy, qz, qw = quaternion_from_euler(grasp_roll, grasp_pitch, grasp_yaw)
+        grasp_orientation = Quaternion(qx, qy, qz, qw)
+        local_dx, local_dy, local_dz = rotate_vector_by_quaternion(
+            grasp_orientation,
+            (grasp_local_x_offset, 0.0, 0.0),
+        )
 
         grasp_pose = PoseStamped()
         grasp_pose.header.frame_id = "base_link"
         grasp_pose.header.stamp = rospy.Time.now()
-        grasp_pose.pose.position.x = float(target_point.point.x) + grasp_offset_x
-        grasp_pose.pose.position.y = float(target_point.point.y) + grasp_offset_y
-        grasp_pose.pose.position.z = clamped_z
-        grasp_pose.pose.orientation = Quaternion(qx, qy, qz, qw)
+        grasp_pose.pose.position.x = float(target_point.point.x) + grasp_offset_x + local_dx
+        grasp_pose.pose.position.y = float(target_point.point.y) + grasp_offset_y + local_dy
+        grasp_pose.pose.position.z = clamped_z + local_dz
+        grasp_pose.pose.orientation = grasp_orientation
 
         blackboard.set("target_grasp_pose", grasp_pose)
         blackboard.set("target_grasp_mode", "direct_yolo_point")
@@ -505,7 +627,7 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
             )
 
         rospy.loginfo(
-            "[Brain] Stage complete: BuildDirectGraspPose | target=%s pos=(%.3f, %.3f, %.3f) rpy=(%.3f, %.3f, %.3f)",
+            "[Brain] Stage complete: BuildDirectGraspPose | target=%s pos=(%.3f, %.3f, %.3f) rpy=(%.3f, %.3f, %.3f) local_x_offset=%.3f",
             target_label,
             grasp_pose.pose.position.x,
             grasp_pose.pose.position.y,
@@ -513,6 +635,7 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
             grasp_roll,
             grasp_pitch,
             grasp_yaw,
+            grasp_local_x_offset,
         )
         self.request_sent = True
         return Status.SUCCESS
@@ -568,6 +691,13 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
         self.last_feedback_stage = None
         self.direct_motion_start_count = self.motion_result_count
         log_stage("PathPlanning")
+        target_object = blackboard_get("target_object", {}) or {}
+        target_label = (
+            target_object.get("name", "unknown")
+            if isinstance(target_object, dict)
+            else str(target_object)
+        )
+        rospy.loginfo("[Brain] Current grasp target label: %s", target_label)
 
     def _call_gripper_grasp(self):
         try:

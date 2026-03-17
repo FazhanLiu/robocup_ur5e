@@ -172,6 +172,7 @@ class PRMPlannerNode:
         self.target_tf_rate = float(rospy.get_param("~target_tf_rate", 10.0))
         self.target_axis_length = float(rospy.get_param("~target_axis_length", 0.08))
         self.target_axis_width = float(rospy.get_param("~target_axis_width", 0.006))
+        self.cleared_target_pose_z = float(rospy.get_param("~cleared_target_pose_z", -10.0))
         self.plan_velocity_scaling = float(rospy.get_param("~plan_velocity_scaling", 1.0))
         self.plan_acceleration_scaling = float(rospy.get_param("~plan_acceleration_scaling", 1.0))
         self.bin_position_only = rospy.get_param("~bin_position_only", False)
@@ -226,6 +227,12 @@ class PRMPlannerNode:
         self.target_pose_pub = rospy.Publisher("~target_pose", PoseStamped, queue_size=1, latch=True)
         self.target_axis_pub = rospy.Publisher("~target_pose_axis", Marker, queue_size=1, latch=True)
         self.status_marker_pub = rospy.Publisher("~status_marker", Marker, queue_size=1, latch=True)
+        self.target_pose_preview_sub = rospy.Subscriber(
+            "/path_planning/target_pose_preview",
+            PoseStamped,
+            self._target_pose_preview_cb,
+            queue_size=1,
+        )
         self.target_tf_broadcaster = tf2_ros.TransformBroadcaster() if self.publish_target_tf else None
         self.target_tf_timer = None
         self.motion_control_client = actionlib.SimpleActionClient(
@@ -327,6 +334,7 @@ class PRMPlannerNode:
         rospy.Service("~plan_pregrasp", Trigger, self._srv_plan_pregrasp)
         rospy.Service("~plan_grasp", Trigger, self._srv_plan_grasp)
         rospy.Service("~plan_to_bin", Trigger, self._srv_plan_to_bin)
+        rospy.Service("/path_planning/clear_target_pose", Trigger, self._srv_clear_target_pose)
 
         if self.allow_gripper_internal_collisions:
             self._allow_gripper_internal_collisions()
@@ -337,6 +345,7 @@ class PRMPlannerNode:
                 self._target_tf_timer_cb,
             )
 
+        self._clear_target_visuals(log_message=False)
         self.plan_execute_pose_server.start()
         rospy.loginfo("[PRM] PRM planner node ready.")
 
@@ -645,6 +654,122 @@ class PRMPlannerNode:
             return True
         except Exception:
             return False
+
+    def _make_hidden_target_pose(self):
+        pose = PoseStamped()
+        pose.header.frame_id = self.frame_id
+        pose.header.stamp = rospy.Time.now()
+        pose.pose.position.x = 0.0
+        pose.pose.position.y = 0.0
+        pose.pose.position.z = self.cleared_target_pose_z
+        pose.pose.orientation.w = 1.0
+        return pose
+
+    def _publish_delete_marker(self, publisher, namespace, marker_id):
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.action = Marker.DELETE
+        publisher.publish(marker)
+
+    def _clear_target_visuals(self, log_message=True):
+        hidden_pose = self._make_hidden_target_pose()
+        with self._target_tf_lock:
+            self._latest_target_pose = copy.deepcopy(hidden_pose)
+
+        self.target_pose_pub.publish(hidden_pose)
+        self._broadcast_target_tf()
+        self._publish_delete_marker(self.target_marker_pub, "prm_target", 1)
+        self._publish_delete_marker(self.path_marker_pub, "prm_ee_path", 2)
+        self._publish_delete_marker(self.status_marker_pub, "prm_status", 3)
+        self._publish_delete_marker(self.target_axis_pub, "prm_target_pose_axis", 4)
+
+        if log_message:
+            rospy.loginfo(
+                "[PRM] Cleared target pose visualization and moved %s below view (z=%.3f).",
+                self.target_tf_frame,
+                self.cleared_target_pose_z,
+            )
+
+    def _srv_clear_target_pose(self, _req):
+        self._clear_target_visuals(log_message=True)
+        return TriggerResponse(success=True, message="target_pose_cleared")
+
+    def _publish_target_preview(self, target_pose):
+        self.target_pose_pub.publish(target_pose)
+        self._update_target_tf(target_pose)
+
+        if not self.publish_plan_markers:
+            return
+
+        now = rospy.Time.now()
+
+        target_marker = Marker()
+        target_marker.header.frame_id = self.frame_id
+        target_marker.header.stamp = now
+        target_marker.ns = "prm_target"
+        target_marker.id = 1
+        target_marker.type = Marker.SPHERE
+        target_marker.action = Marker.ADD
+        target_marker.pose = target_pose.pose
+        target_marker.scale.x = 0.035
+        target_marker.scale.y = 0.035
+        target_marker.scale.z = 0.035
+        target_marker.color.a = 1.0
+        target_marker.color.r = 1.0
+        target_marker.color.g = 0.8
+        target_marker.color.b = 0.1
+        self.target_marker_pub.publish(target_marker)
+
+        axis_marker = Marker()
+        axis_marker.header.frame_id = self.frame_id
+        axis_marker.header.stamp = now
+        axis_marker.ns = "prm_target_pose_axis"
+        axis_marker.id = 4
+        axis_marker.type = Marker.LINE_LIST
+        axis_marker.action = Marker.ADD
+        axis_marker.pose.orientation.w = 1.0
+        axis_marker.scale.x = self.target_axis_width
+        axis_marker.points = []
+        axis_marker.colors = []
+
+        origin = target_pose.pose.position
+        quat = target_pose.pose.orientation
+        axis_specs = [
+            ((self.target_axis_length, 0.0, 0.0), ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)),
+            ((0.0, self.target_axis_length, 0.0), ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)),
+            ((0.0, 0.0, self.target_axis_length), ColorRGBA(r=0.0, g=0.4, b=1.0, a=1.0)),
+        ]
+        for axis_vec, color in axis_specs:
+            dx, dy, dz = rotate_vector_by_quaternion(quat, axis_vec)
+            start = Point()
+            start.x = origin.x
+            start.y = origin.y
+            start.z = origin.z
+            end = Point()
+            end.x = origin.x + dx
+            end.y = origin.y + dy
+            end.z = origin.z + dz
+            axis_marker.points.extend([start, end])
+            axis_marker.colors.extend([color, color])
+        self.target_axis_pub.publish(axis_marker)
+
+        self._publish_delete_marker(self.path_marker_pub, "prm_ee_path", 2)
+        self._publish_delete_marker(self.status_marker_pub, "prm_status", 3)
+
+    def _target_pose_preview_cb(self, msg):
+        if not msg.header.frame_id:
+            return
+        self._publish_target_preview(msg)
+        rospy.loginfo(
+            "[PRM] Preview target pose updated: frame=%s pos=(%.3f, %.3f, %.3f)",
+            msg.header.frame_id,
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+        )
 
     def _update_target_tf(self, target_pose):
         if not self.publish_target_tf:

@@ -144,6 +144,44 @@ class UR5eTeachPendantUI(QMainWindow):
             rospy.logdebug("[TeachPendantUI] TF lookup failed: %s" % str(e))
             return None, None
 
+    @staticmethod
+    def _extract_arm_joints_from_joint_state(msg):
+        joint_names = [
+            'shoulder_pan_joint',
+            'shoulder_lift_joint',
+            'elbow_joint',
+            'wrist_1_joint',
+            'wrist_2_joint',
+            'wrist_3_joint',
+        ]
+        joints = []
+        for name in joint_names:
+            if name not in msg.name:
+                return None
+            joints.append(float(msg.position[msg.name.index(name)]))
+        return joints
+
+    def _get_current_joints_from_topic(self, timeout_sec=0.5, prefer_cached=True):
+        if prefer_cached and self.current_joints and len(self.current_joints) == 6:
+            return list(self.current_joints)
+        try:
+            msg = rospy.wait_for_message('/joint_states', JointState, timeout=timeout_sec)
+        except rospy.ROSException:
+            return None
+        return self._extract_arm_joints_from_joint_state(msg)
+
+    def _apply_joint_values_to_ui(self, joints, force=False):
+        if joints is None:
+            return
+        self.current_joints = list(joints)
+        if self._joint_edit_mode and not force:
+            return
+        for i, angle in enumerate(joints):
+            if i < len(self.joint_spinboxes):
+                self.joint_spinboxes[i].blockSignals(True)
+                self.joint_spinboxes[i].setValue(angle)
+                self.joint_spinboxes[i].blockSignals(False)
+
     def _send_move_to_pose(self, target_pose_stamped):
         """Publish MotionCommand MOVE_TO_POSE."""
         target_pose_stamped.header.stamp = rospy.Time.now()
@@ -556,17 +594,25 @@ class UR5eTeachPendantUI(QMainWindow):
         if pose_dict is None:
             self.log("Refresh pose: TF failed (base_link->tool0)")
             return
+
+        joints = self._get_current_joints_from_topic(timeout_sec=0.5, prefer_cached=False)
         self.current_pose = pose_dict
         self.current_pose_stamped = pose_stamped
         self.pose_updated_signal.emit(pose_dict)
-        self.log("Refresh pose OK")
+        if joints is not None:
+            self._apply_joint_values_to_ui(joints, force=True)
+            self.log(
+                "Refresh joints: [%s]"
+                % ", ".join(f"{joint:.4f}" for joint in joints)
+            )
+            self.log("Refresh pose + joints OK")
+        else:
+            self.log("Refresh pose OK (joint states unavailable)")
 
     def on_joint_state_received(self, msg):
-        joints = []
-        for name in ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']:
-            if name in msg.name:
-                joints.append(msg.position[msg.name.index(name)])
-        if len(joints) == 6:
+        joints = self._extract_arm_joints_from_joint_state(msg)
+        if joints is not None:
+            self.current_joints = joints
             self.joints_updated_signal.emit(joints)
 
     def _on_workspace_bounds_received(self, msg):
@@ -655,14 +701,7 @@ class UR5eTeachPendantUI(QMainWindow):
             self._toggle_joint_edit_mode()
 
     def on_joints_updated(self, joints):
-        self.current_joints = joints
-        if self._joint_edit_mode:
-            return
-        for i, angle in enumerate(joints):
-            if i < len(self.joint_spinboxes):
-                self.joint_spinboxes[i].blockSignals(True)
-                self.joint_spinboxes[i].setValue(angle)
-                self.joint_spinboxes[i].blockSignals(False)
+        self._apply_joint_values_to_ui(joints, force=False)
 
     # =========================================================================
     # Dexterous Space Traversal

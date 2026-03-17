@@ -678,21 +678,40 @@ class MotionControlNode:
     def _gripper_state_callback(self, msg: JointTrajectoryControllerState):
         self._latest_gripper_state = msg
 
-    def _get_gripper_actual_position(self, timeout_sec: float = 0.5) -> Optional[float]:
+    def _get_gripper_state(
+        self,
+        timeout_sec: float = 0.5,
+        min_seq: Optional[int] = None,
+    ) -> Optional[JointTrajectoryControllerState]:
         state = self._latest_gripper_state
+        if state is not None:
+            seq = int(getattr(state.header, "seq", 0))
+            if min_seq is None or seq > int(min_seq):
+                return state
+
+        deadline = rospy.Time.now() + rospy.Duration(max(0.0, timeout_sec))
+        while not rospy.is_shutdown():
+            remaining = (deadline - rospy.Time.now()).to_sec()
+            if remaining <= 0.0:
+                break
+            try:
+                state = rospy.wait_for_message(
+                    '/gripper_controller/state',
+                    JointTrajectoryControllerState,
+                    timeout=remaining,
+                )
+            except rospy.ROSException:
+                return None
+            self._latest_gripper_state = state
+            seq = int(getattr(state.header, "seq", 0))
+            if min_seq is None or seq > int(min_seq):
+                return state
+        return None
+
+    def _get_gripper_actual_position(self, timeout_sec: float = 0.5) -> Optional[float]:
+        state = self._get_gripper_state(timeout_sec=timeout_sec)
         if state is not None and state.actual.positions:
             return float(state.actual.positions[0])
-        try:
-            state = rospy.wait_for_message(
-                '/gripper_controller/state',
-                JointTrajectoryControllerState,
-                timeout=timeout_sec,
-            )
-            self._latest_gripper_state = state
-            if state.actual.positions:
-                return float(state.actual.positions[0])
-        except rospy.ROSException:
-            return None
         return None
 
     @staticmethod
@@ -701,10 +720,37 @@ class MotionControlNode:
         wrapped_error = abs(((actual - target + np.pi) % (2.0 * np.pi)) - np.pi)
         return min(direct_error, wrapped_error)
 
-    def _gripper_reached_position(self, target: float, retries: int = 3, timeout_sec: float = 0.4) -> Tuple[bool, Optional[float]]:
+    def _gripper_reached_position(
+        self,
+        target: float,
+        retries: int = 3,
+        timeout_sec: float = 0.4,
+        min_seq: Optional[int] = None,
+    ) -> Tuple[bool, Optional[float]]:
         for _ in range(retries):
-            actual = self._get_gripper_actual_position(timeout_sec=timeout_sec)
-            if actual is not None and self._wrapped_position_error(actual, target) <= self.gripper_position_tolerance:
+            state = self._get_gripper_state(timeout_sec=timeout_sec, min_seq=min_seq)
+            actual = None
+            desired = None
+            error = None
+            if state is not None:
+                if state.actual.positions:
+                    actual = float(state.actual.positions[0])
+                if state.desired.positions:
+                    desired = float(state.desired.positions[0])
+                if state.error.positions:
+                    error = float(state.error.positions[0])
+
+            desired_matches = desired is None or (
+                self._wrapped_position_error(desired, target)
+                <= self.gripper_position_tolerance
+            )
+            actual_matches = actual is not None and (
+                self._wrapped_position_error(actual, target)
+                <= self.gripper_position_tolerance
+            )
+            error_matches = error is not None and abs(error) <= self.gripper_position_tolerance
+
+            if desired_matches and (actual_matches or error_matches):
                 return True, actual
             rospy.sleep(0.1)
         return False, actual if 'actual' in locals() else None
@@ -741,6 +787,9 @@ class MotionControlNode:
         goal.trajectory.points.append(point)
 
         timeout = point.time_from_start.to_sec() + self.gripper_wait_timeout
+        pre_goal_seq = None
+        if self._latest_gripper_state is not None:
+            pre_goal_seq = int(getattr(self._latest_gripper_state.header, "seq", 0))
         with self._gripper_lock:
             self.gripper_client.send_goal(goal)
             if not self.gripper_client.wait_for_result(timeout=rospy.Duration(timeout)):
@@ -751,7 +800,12 @@ class MotionControlNode:
             result = self.gripper_client.get_result()
 
         if state != action_msgs.GoalStatus.SUCCEEDED:
-            reached, actual = self._gripper_reached_position(float(position))
+            reached, actual = self._gripper_reached_position(
+                float(position),
+                retries=5,
+                timeout_sec=0.5,
+                min_seq=pre_goal_seq,
+            )
             if reached:
                 return True, (
                     f"{label} reached target within tolerance "

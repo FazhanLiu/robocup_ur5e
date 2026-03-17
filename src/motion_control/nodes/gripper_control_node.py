@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-夹爪控制节点 - 使用 Gazebo 暴露的单关节 FollowJointTrajectory 接口
+夹爪控制调试节点 - 使用 Gazebo 暴露的单关节 FollowJointTrajectory 接口
+- 默认走 /debug_gripper/*，避免和 motion_control 内置夹爪接口冲突
 - 提供 grasp / release 命令（Topic + Service）
 - 对接 /gripper_controller/follow_joint_trajectory
-- 发布 /gripper/grasp_result (Bool)
+- 发布 grasp_result (Bool)
 """
 
 import rospy
@@ -38,6 +39,11 @@ class GripperControlNode:
         )
         self.move_time = float(rospy.get_param('~move_time', DEFAULT_MOVE_TIME))
         self.position_tolerance = float(rospy.get_param('~position_tolerance', 0.03))
+        self.command_topic = rospy.get_param('~command_topic', '/debug_gripper/command')
+        self.grasp_service_name = rospy.get_param('~grasp_service', '/debug_gripper/grasp')
+        self.release_service_name = rospy.get_param('~release_service', '/debug_gripper/release')
+        self.result_topic = rospy.get_param('~result_topic', '/debug_gripper/grasp_result')
+        self.state_topic = rospy.get_param('~state_topic', '/gripper_controller/state')
 
         self.client = actionlib.SimpleActionClient(
             self.action_name, FollowJointTrajectoryAction
@@ -46,25 +52,31 @@ class GripperControlNode:
         self.latest_state = None
 
         self.result_pub = rospy.Publisher(
-            '/gripper/grasp_result', Bool, queue_size=1
+            self.result_topic, Bool, queue_size=1
         )
         self.cmd_sub = rospy.Subscriber(
-            '/gripper/command', String, self._cmd_callback, queue_size=1
+            self.command_topic, String, self._cmd_callback, queue_size=1
         )
         self.grasp_srv = rospy.Service(
-            '/gripper/grasp', Trigger, self._grasp_service
+            self.grasp_service_name, Trigger, self._grasp_service
+        )
+        self.release_srv = rospy.Service(
+            self.release_service_name, Trigger, self._release_service
         )
         self.state_sub = rospy.Subscriber(
-            '/gripper_controller/state',
+            self.state_topic,
             JointTrajectoryControllerState,
             self._state_callback,
             queue_size=1,
         )
 
         rospy.loginfo(
-            "[GripperControl] Ready. Will connect to action %s on demand for joint %s.",
+            "[GripperControl] Ready. action=%s joint=%s command=%s grasp_srv=%s release_srv=%s",
             self.action_name,
             self.gripper_joint_name,
+            self.command_topic,
+            self.grasp_service_name,
+            self.release_service_name,
         )
 
     def _ensure_server(self, timeout_sec=0.2):
@@ -87,7 +99,7 @@ class GripperControlNode:
             return float(self.latest_state.actual.positions[0])
         try:
             msg = rospy.wait_for_message(
-                '/gripper_controller/state',
+                self.state_topic,
                 JointTrajectoryControllerState,
                 timeout=timeout_sec,
             )
@@ -98,10 +110,16 @@ class GripperControlNode:
             return None
         return None
 
+    @staticmethod
+    def _wrapped_position_error(actual, target):
+        direct_error = abs(actual - target)
+        wrapped_error = abs(((actual - target + 3.141592653589793) % (2.0 * 3.141592653589793)) - 3.141592653589793)
+        return min(direct_error, wrapped_error)
+
     def _reached_target(self, target):
         for _ in range(3):
             actual = self._get_actual_position(timeout_sec=0.4)
-            if actual is not None and abs(actual - target) <= self.position_tolerance:
+            if actual is not None and self._wrapped_position_error(actual, target) <= self.position_tolerance:
                 return True
             rospy.sleep(0.1)
         return False
@@ -118,6 +136,13 @@ class GripperControlNode:
         return TriggerResponse(
             success=success,
             message="grasp_success" if success else "grasp_empty"
+        )
+
+    def _release_service(self, req):
+        success = self._do_release()
+        return TriggerResponse(
+            success=success,
+            message="release_success" if success else "release_failed"
         )
 
     def _do_grasp(self):

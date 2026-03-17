@@ -9,14 +9,17 @@
   <arg name="path_planning_position_only" default="false" />
   <arg name="direct_grasp_offset_x" default="0.0" />
   <arg name="direct_grasp_offset_y" default="0.0" />
-  <arg name="direct_grasp_offset_z" default="0.02" />
+  <arg name="direct_grasp_offset_z" default="0.0" />
+  <arg name="direct_grasp_local_x_offset" default="0.14" />
   <arg name="direct_grasp_min_z" default="0.05" />
   <arg name="direct_grasp_max_z" default="1.20" />
   <arg name="direct_grasp_roll" default="3.141592653589793" />
-  <arg name="direct_grasp_pitch" default="0.0" />
+  <arg name="direct_grasp_pitch" default="1.5707963267948966" />
   <arg name="direct_grasp_yaw" default="0.0" />
   <arg name="direct_motion_max_velocity" default="0.6" />
   <arg name="direct_motion_max_acceleration" default="0.6" />
+  <arg name="preferred_target_label" default="cube" />
+  <arg name="cube_class_labels" default="['class_1', 'class_3', 'class_5', 'class_7']" />
   <arg name="yolo_enable_topic" default="/perception/yolo26_seg_enabled" />
   <param name="ros_master_uri" value="$(arg ros_master_uri)" />
 
@@ -32,6 +35,7 @@
     <param name="direct_grasp_offset_x" value="$(arg direct_grasp_offset_x)" />
     <param name="direct_grasp_offset_y" value="$(arg direct_grasp_offset_y)" />
     <param name="direct_grasp_offset_z" value="$(arg direct_grasp_offset_z)" />
+    <param name="direct_grasp_local_x_offset" value="$(arg direct_grasp_local_x_offset)" />
     <param name="direct_grasp_min_z" value="$(arg direct_grasp_min_z)" />
     <param name="direct_grasp_max_z" value="$(arg direct_grasp_max_z)" />
     <param name="direct_grasp_roll" value="$(arg direct_grasp_roll)" />
@@ -39,6 +43,8 @@
     <param name="direct_grasp_yaw" value="$(arg direct_grasp_yaw)" />
     <param name="direct_motion_max_velocity" value="$(arg direct_motion_max_velocity)" />
     <param name="direct_motion_max_acceleration" value="$(arg direct_motion_max_acceleration)" />
+    <param name="preferred_target_label" value="$(arg preferred_target_label)" />
+    <rosparam param="cube_class_labels" subst_value="true">$(arg cube_class_labels)</rosparam>
     <param name="yolo_enable_topic" value="$(arg yolo_enable_topic)" />
   </node>
 </launch>
