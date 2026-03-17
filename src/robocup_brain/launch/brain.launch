@@ -6,14 +6,18 @@
   <arg name="start_brain" default="false" />
   <arg name="test_mode" default="false" />
   <arg name="single_cycle" default="true" />
-  <arg name="path_planning_position_only" default="true" />
+  <arg name="path_planning_position_only" default="false" />
   <arg name="direct_grasp_offset_x" default="0.0" />
   <arg name="direct_grasp_offset_y" default="0.0" />
   <arg name="direct_grasp_offset_z" default="0.02" />
   <arg name="direct_grasp_min_z" default="0.05" />
   <arg name="direct_grasp_max_z" default="1.20" />
+  <arg name="direct_grasp_roll" default="3.141592653589793" />
+  <arg name="direct_grasp_pitch" default="0.0" />
+  <arg name="direct_grasp_yaw" default="0.0" />
   <arg name="direct_motion_max_velocity" default="0.6" />
   <arg name="direct_motion_max_acceleration" default="0.6" />
+  <arg name="yolo_enable_topic" default="/perception/yolo26_seg_enabled" />
   <param name="ros_master_uri" value="$(arg ros_master_uri)" />
 
   <!-- Brain 容器启动时一并拉起 motion_control，并在进程退出时自动重启 -->
@@ -30,7 +34,11 @@
     <param name="direct_grasp_offset_z" value="$(arg direct_grasp_offset_z)" />
     <param name="direct_grasp_min_z" value="$(arg direct_grasp_min_z)" />
     <param name="direct_grasp_max_z" value="$(arg direct_grasp_max_z)" />
+    <param name="direct_grasp_roll" value="$(arg direct_grasp_roll)" />
+    <param name="direct_grasp_pitch" value="$(arg direct_grasp_pitch)" />
+    <param name="direct_grasp_yaw" value="$(arg direct_grasp_yaw)" />
     <param name="direct_motion_max_velocity" value="$(arg direct_motion_max_velocity)" />
     <param name="direct_motion_max_acceleration" value="$(arg direct_motion_max_acceleration)" />
+    <param name="yolo_enable_topic" value="$(arg yolo_enable_topic)" />
   </node>
 </launch>

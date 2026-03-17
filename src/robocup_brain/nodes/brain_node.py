@@ -24,8 +24,9 @@ import tf2_geometry_msgs
 import tf2_ros
 from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
 from py_trees.common import Status
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
+from tf.transformations import quaternion_from_euler
 
 from common_msgs.msg import (
     GraspResult,
@@ -139,6 +140,16 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
             "/motion/result", GraspResult, self._motion_result_callback
         )
         self.gripper_cmd_pub = rospy.Publisher("/gripper/command", String, queue_size=1)
+        self.yolo_enable_topic = rospy.get_param(
+            "~yolo_enable_topic",
+            "/perception/yolo26_seg_enabled",
+        )
+        self.yolo_enable_pub = rospy.Publisher(
+            self.yolo_enable_topic,
+            Bool,
+            queue_size=1,
+            latch=True,
+        )
         self.gripper_release_srv = rospy.ServiceProxy("/gripper/release", Trigger)
         self.command_sent = False
         self.last_result = None
@@ -154,6 +165,8 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
         self.last_result = None
         self.release_done = False
         log_stage("MoveToOverview")
+        self.yolo_enable_pub.publish(Bool(data=False))
+        rospy.loginfo("[Brain] Stage action: disable YOLO perception")
 
     def _open_gripper(self):
         try:
@@ -226,6 +239,16 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         self.latest_stamp = rospy.Time(0)
         self.sub = None
         self.mock_done = False
+        self.yolo_enable_topic = rospy.get_param(
+            "~yolo_enable_topic",
+            "/perception/yolo26_seg_enabled",
+        )
+        self.yolo_enable_pub = rospy.Publisher(
+            self.yolo_enable_topic,
+            Bool,
+            queue_size=1,
+            latch=True,
+        )
 
     def setup(self, timeout=None):
         if is_test_mode():
@@ -279,8 +302,13 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
 
     def initialise(self):
         self.mock_done = False
+        self.latest_detections = []
+        self.latest_frame_id = ""
+        self.latest_stamp = rospy.Time(0)
         clear_target_selection()
         log_stage("EvaluateTargets")
+        self.yolo_enable_pub.publish(Bool(data=True))
+        rospy.loginfo("[Brain] Stage action: enable YOLO perception")
 
     def _lookup_transform(self, frame_id, stamp):
         try:
@@ -394,6 +422,8 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         blackboard.set("target_key", best_target_key)
         blackboard.set("target_score", highest_score)
         blackboard.set("target_confidence", highest_confidence)
+        self.yolo_enable_pub.publish(Bool(data=False))
+        rospy.loginfo("[Brain] Stage action: disable YOLO perception")
         rospy.loginfo(
             "[Brain] Stage complete: EvaluateTargets | selected=%s score=%s confidence=%.3f",
             best_target.get("name", "unknown"),
@@ -447,9 +477,13 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
         grasp_offset_z = float(rospy.get_param("~direct_grasp_offset_z", 0.02))
         grasp_min_z = float(rospy.get_param("~direct_grasp_min_z", 0.05))
         grasp_max_z = float(rospy.get_param("~direct_grasp_max_z", 1.20))
+        grasp_roll = float(rospy.get_param("~direct_grasp_roll", 3.141592653589793))
+        grasp_pitch = float(rospy.get_param("~direct_grasp_pitch", 0.0))
+        grasp_yaw = float(rospy.get_param("~direct_grasp_yaw", 0.0))
 
         raw_z = float(target_point.point.z) + grasp_offset_z
         clamped_z = max(grasp_min_z, min(grasp_max_z, raw_z))
+        qx, qy, qz, qw = quaternion_from_euler(grasp_roll, grasp_pitch, grasp_yaw)
 
         grasp_pose = PoseStamped()
         grasp_pose.header.frame_id = "base_link"
@@ -457,7 +491,7 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
         grasp_pose.pose.position.x = float(target_point.point.x) + grasp_offset_x
         grasp_pose.pose.position.y = float(target_point.point.y) + grasp_offset_y
         grasp_pose.pose.position.z = clamped_z
-        grasp_pose.pose.orientation = Quaternion(0.0, 0.0, 0.0, 1.0)
+        grasp_pose.pose.orientation = Quaternion(qx, qy, qz, qw)
 
         blackboard.set("target_grasp_pose", grasp_pose)
         blackboard.set("target_grasp_mode", "direct_yolo_point")
@@ -471,11 +505,14 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
             )
 
         rospy.loginfo(
-            "[Brain] Stage complete: BuildDirectGraspPose | target=%s pos=(%.3f, %.3f, %.3f)",
+            "[Brain] Stage complete: BuildDirectGraspPose | target=%s pos=(%.3f, %.3f, %.3f) rpy=(%.3f, %.3f, %.3f)",
             target_label,
             grasp_pose.pose.position.x,
             grasp_pose.pose.position.y,
             grasp_pose.pose.position.z,
+            grasp_roll,
+            grasp_pitch,
+            grasp_yaw,
         )
         self.request_sent = True
         return Status.SUCCESS
@@ -622,7 +659,7 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
             if self.client is not None and self.client.wait_for_server(rospy.Duration(0.1)):
                 goal = PlanExecutePoseGoal()
                 goal.target_pose = target_pose
-                goal.position_only = rospy.get_param("~path_planning_position_only", True)
+                goal.position_only = rospy.get_param("~path_planning_position_only", False)
 
                 rospy.loginfo("[Brain] Stage action: send pose to path_planning")
                 self.client.send_goal(goal, feedback_cb=self._feedback_callback)

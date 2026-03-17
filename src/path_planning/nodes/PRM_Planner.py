@@ -134,6 +134,8 @@ class PRMPlannerNode:
 
         planning_time = rospy.get_param("~planning_time", 10.0)
         attempts = rospy.get_param("~attempts", 10)
+        self.planning_time = float(planning_time)
+        self.planning_attempts = int(attempts)
         self.execute_motion = rospy.get_param("~execute", False)
         self.clear_octomap_before_plan = rospy.get_param("~clear_octomap_before_plan", True)
         self.clear_octomap_on_failure = rospy.get_param("~clear_octomap_on_failure", True)
@@ -170,6 +172,8 @@ class PRMPlannerNode:
         self.target_tf_rate = float(rospy.get_param("~target_tf_rate", 10.0))
         self.target_axis_length = float(rospy.get_param("~target_axis_length", 0.08))
         self.target_axis_width = float(rospy.get_param("~target_axis_width", 0.006))
+        self.plan_velocity_scaling = float(rospy.get_param("~plan_velocity_scaling", 1.0))
+        self.plan_acceleration_scaling = float(rospy.get_param("~plan_acceleration_scaling", 1.0))
         self.bin_position_only = rospy.get_param("~bin_position_only", False)
         self.use_object_score_target = rospy.get_param("~use_object_score_target", True)
         self.object_score_topic = rospy.get_param("~object_score_topic", "/perception/object_score")
@@ -190,6 +194,19 @@ class PRMPlannerNode:
         )
         self.execute_max_velocity = float(rospy.get_param("~execute_max_velocity", 1.0))
         self.execute_max_acceleration = float(rospy.get_param("~execute_max_acceleration", 1.0))
+        self.action_planning_time = float(
+            rospy.get_param("~action_planning_time", min(self.planning_time, 10.0))
+        )
+        self.action_attempts = int(rospy.get_param("~action_attempts", 1))
+        self.action_use_fallback_planners = bool(
+            rospy.get_param("~action_use_fallback_planners", False)
+        )
+        self.action_clear_octomap_before_plan = bool(
+            rospy.get_param("~action_clear_octomap_before_plan", False)
+        )
+        self.action_clear_octomap_on_failure = bool(
+            rospy.get_param("~action_clear_octomap_on_failure", False)
+        )
         self.latest_objects = {}
         self.selected_object = None
 
@@ -229,6 +246,8 @@ class PRMPlannerNode:
         self.group.set_goal_position_tolerance(self.goal_position_tolerance)
         self.group.set_goal_orientation_tolerance(self.goal_orientation_tolerance)
         self.group.set_goal_joint_tolerance(self.goal_joint_tolerance)
+        self.group.set_max_velocity_scaling_factor(max(0.01, min(1.0, self.plan_velocity_scaling)))
+        self.group.set_max_acceleration_scaling_factor(max(0.01, min(1.0, self.plan_acceleration_scaling)))
         self.group.allow_replanning(True)
         self.group.set_start_state_to_current_state()
 
@@ -248,6 +267,21 @@ class PRMPlannerNode:
             self.goal_orientation_tolerance,
             self.goal_joint_tolerance,
             str(self.bin_position_only),
+        )
+        rospy.loginfo(
+            "[PRM] MoveIt scaling: plan_velocity=%.2f plan_acceleration=%.2f execute_velocity=%.2f execute_acceleration=%.2f",
+            self.plan_velocity_scaling,
+            self.plan_acceleration_scaling,
+            self.execute_max_velocity,
+            self.execute_max_acceleration,
+        )
+        rospy.loginfo(
+            "[PRM] Action planning policy: time=%.2f attempts=%d use_fallback_planners=%s clear_octomap_before_plan=%s clear_octomap_on_failure=%s",
+            self.action_planning_time,
+            self.action_attempts,
+            str(self.action_use_fallback_planners),
+            str(self.action_clear_octomap_before_plan),
+            str(self.action_clear_octomap_on_failure),
         )
         rospy.loginfo(
             "[PRM] Octomap clearing: before_plan=%s on_failure=%s",
@@ -333,6 +367,34 @@ class PRMPlannerNode:
             return False, "target_pose orientation is invalid (zero quaternion)"
         return True, ""
 
+    def _set_group_planning_config(self, planning_time, attempts):
+        self.group.set_planning_time(float(planning_time))
+        self.group.set_num_planning_attempts(int(attempts))
+
+    def _plan_action_target(self, goal):
+        saved_clear_before = self.clear_octomap_before_plan
+        saved_clear_on_failure = self.clear_octomap_on_failure
+        saved_fallback_planners = list(self.fallback_planners)
+
+        self.clear_octomap_before_plan = self.action_clear_octomap_before_plan
+        self.clear_octomap_on_failure = self.action_clear_octomap_on_failure
+        if not self.action_use_fallback_planners:
+            self.fallback_planners = []
+        self._set_group_planning_config(self.action_planning_time, self.action_attempts)
+
+        try:
+            return self.plan_to_pose(
+                goal.target_pose,
+                label="action_target",
+                position_only=goal.position_only,
+                execute_motion=False,
+            )
+        finally:
+            self.clear_octomap_before_plan = saved_clear_before
+            self.clear_octomap_on_failure = saved_clear_on_failure
+            self.fallback_planners = saved_fallback_planners
+            self._set_group_planning_config(self.planning_time, self.planning_attempts)
+
     def _execute_pose_action_cb(self, goal):
         is_valid, message = self._validate_plan_execute_goal(goal)
         if not is_valid:
@@ -357,12 +419,14 @@ class PRMPlannerNode:
             PlanExecutePoseFeedback.PLANNING,
             "Planning with MoveIt/PRM",
         )
-        success, robot_traj = self.plan_to_pose(
-            goal.target_pose,
-            label="action_target",
-            position_only=goal.position_only,
-            execute_motion=False,
+        rospy.loginfo(
+            "[PRM] Action target planning budget: time=%.2fs attempts=%d fallback_planners=%s octomap_retry=%s",
+            self.action_planning_time,
+            self.action_attempts,
+            str(self.action_use_fallback_planners),
+            str(self.action_clear_octomap_on_failure),
         )
+        success, robot_traj = self._plan_action_target(goal)
 
         if self.plan_execute_pose_server.is_preempt_requested():
             result = self._make_plan_execute_result(

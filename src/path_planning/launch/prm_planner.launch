@@ -12,8 +12,15 @@
   <arg name="clear_octomap_before_plan" default="true" />
   <arg name="clear_octomap_on_failure" default="true" />
   <arg name="save_plot" default="false" />
-  <arg name="execute_max_velocity" default="1.0" />
-  <arg name="execute_max_acceleration" default="1.0" />
+  <arg name="plan_velocity_scaling" default="1.0" />
+  <arg name="plan_acceleration_scaling" default="1.0" />
+  <arg name="action_planning_time" default="10.0" />
+  <arg name="action_attempts" default="1" />
+  <arg name="action_use_fallback_planners" default="false" />
+  <arg name="action_clear_octomap_before_plan" default="false" />
+  <arg name="action_clear_octomap_on_failure" default="false" />
+  <arg name="execute_max_velocity" default="1.5" />
+  <arg name="execute_max_acceleration" default="1.5" />
 
   <node name="prm_planner_node" pkg="path_planning" type="PRM_Planner.py" output="screen">
     <param name="execute" value="$(arg execute)" />
@@ -28,6 +35,13 @@
     <param name="clear_octomap_before_plan" value="$(arg clear_octomap_before_plan)" />
     <param name="clear_octomap_on_failure" value="$(arg clear_octomap_on_failure)" />
     <param name="save_plan_plot" value="$(arg save_plot)" />
+    <param name="plan_velocity_scaling" value="$(arg plan_velocity_scaling)" />
+    <param name="plan_acceleration_scaling" value="$(arg plan_acceleration_scaling)" />
+    <param name="action_planning_time" value="$(arg action_planning_time)" />
+    <param name="action_attempts" value="$(arg action_attempts)" />
+    <param name="action_use_fallback_planners" value="$(arg action_use_fallback_planners)" />
+    <param name="action_clear_octomap_before_plan" value="$(arg action_clear_octomap_before_plan)" />
+    <param name="action_clear_octomap_on_failure" value="$(arg action_clear_octomap_on_failure)" />
     <param name="execute_max_velocity" value="$(arg execute_max_velocity)" />
     <param name="execute_max_acceleration" value="$(arg execute_max_acceleration)" />
   </node>

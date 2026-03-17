@@ -695,10 +695,16 @@ class MotionControlNode:
             return None
         return None
 
+    @staticmethod
+    def _wrapped_position_error(actual: float, target: float) -> float:
+        direct_error = abs(actual - target)
+        wrapped_error = abs(((actual - target + np.pi) % (2.0 * np.pi)) - np.pi)
+        return min(direct_error, wrapped_error)
+
     def _gripper_reached_position(self, target: float, retries: int = 3, timeout_sec: float = 0.4) -> Tuple[bool, Optional[float]]:
         for _ in range(retries):
             actual = self._get_gripper_actual_position(timeout_sec=timeout_sec)
-            if actual is not None and abs(actual - target) <= self.gripper_position_tolerance:
+            if actual is not None and self._wrapped_position_error(actual, target) <= self.gripper_position_tolerance:
                 return True, actual
             rospy.sleep(0.1)
         return False, actual if 'actual' in locals() else None
@@ -756,7 +762,7 @@ class MotionControlNode:
 
         return True, f"{label} completed"
 
-    def _execute_gripper_grasp(self) -> bool:
+    def _execute_gripper_grasp(self) -> Tuple[bool, str]:
         success, message = self._send_gripper_position(
             self.gripper_closed_position,
             "Gripper grasp",
@@ -766,9 +772,9 @@ class MotionControlNode:
             rospy.loginfo("[MotionControl] %s", message)
         else:
             rospy.logwarn("[MotionControl] %s", message)
-        return success
+        return success, message
 
-    def _execute_gripper_release(self) -> bool:
+    def _execute_gripper_release(self) -> Tuple[bool, str]:
         success, message = self._send_gripper_position(
             self.gripper_open_position,
             "Gripper release",
@@ -778,7 +784,7 @@ class MotionControlNode:
             rospy.loginfo("[MotionControl] %s", message)
         else:
             rospy.logwarn("[MotionControl] %s", message)
-        return success
+        return success, message
 
     def _gripper_command_callback(self, msg: String):
         command = msg.data.lower().strip()
@@ -790,17 +796,17 @@ class MotionControlNode:
             rospy.logwarn("[MotionControl] Unknown gripper command: %s", msg.data)
 
     def _handle_gripper_grasp(self, _req):
-        success = self._execute_gripper_grasp()
+        success, message = self._execute_gripper_grasp()
         return TriggerResponse(
             success=success,
-            message="grasp_success" if success else "grasp_failed",
+            message=message if message else ("grasp_success" if success else "grasp_failed"),
         )
 
     def _handle_gripper_release(self, _req):
-        success = self._execute_gripper_release()
+        success, message = self._execute_gripper_release()
         return TriggerResponse(
             success=success,
-            message="release_success" if success else "release_failed",
+            message=message if message else ("release_success" if success else "release_failed"),
         )
 
     def motion_command_callback(self, msg: MotionCommand):
@@ -1170,17 +1176,18 @@ class MotionControlNode:
         command = copy.deepcopy(trajectory)
         scale_factors = [1.0]
 
-        if 0.0 < max_velocity < 1.0:
+        if max_velocity > 0.0:
             scale_factors.append(1.0 / max_velocity)
-        if 0.0 < max_acceleration < 1.0:
+        if max_acceleration > 0.0:
             scale_factors.append(1.0 / np.sqrt(max_acceleration))
 
         time_scale = max(scale_factors)
-        if time_scale <= 1.0:
+        if abs(time_scale - 1.0) < 1e-6:
             return command
 
         for point in command.points:
-            point.time_from_start = rospy.Duration(point.time_from_start.to_sec() * time_scale)
+            scaled_time = max(0.05, point.time_from_start.to_sec() * time_scale)
+            point.time_from_start = rospy.Duration(scaled_time)
             if point.velocities:
                 point.velocities = [value / time_scale for value in point.velocities]
             if point.accelerations:

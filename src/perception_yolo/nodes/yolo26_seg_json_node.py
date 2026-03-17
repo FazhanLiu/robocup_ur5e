@@ -21,12 +21,12 @@ import numpy as np
 import rospy
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from ultralytics import YOLO
 
 
-HARDCODED_MODEL_PATH = "/workspace/weights/yolo/yolo26m-seg.pt"
-
+#HARDCODED_MODEL_PATH = "/workspace/weights/yolo/yolo26m-seg.pt"
+HARDCODED_MODEL_PATH = "/workspace/weights/yolo/best.pt"
 
 class Yolo26SegJsonNode:
     def __init__(self):
@@ -43,6 +43,11 @@ class Yolo26SegJsonNode:
         self.depth_topic = rospy.get_param("~depth_topic", "/camera/depth/image_raw")
         self.camera_info_topic = rospy.get_param("~camera_info_topic", "/camera/rgb/camera_info")
         self.output_topic = rospy.get_param("~output_topic", "/perception/yolo26_seg_detections")
+        self.enable_topic = rospy.get_param(
+            "~enable_topic",
+            "/perception/yolo26_seg_enabled",
+        )
+        self.enabled = bool(rospy.get_param("~start_enabled", True))
 
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(self.model_path)
@@ -50,6 +55,12 @@ class Yolo26SegJsonNode:
 
         self._last_print = 0.0
         self.pub_json = rospy.Publisher(self.output_topic, String, queue_size=10)
+        self.enable_sub = rospy.Subscriber(
+            self.enable_topic,
+            Bool,
+            self._enable_callback,
+            queue_size=1,
+        )
 
         rgb_sub = message_filters.Subscriber(self.rgb_topic, Image)
         depth_sub = message_filters.Subscriber(self.depth_topic, Image)
@@ -64,7 +75,15 @@ class Yolo26SegJsonNode:
         rospy.loginfo("YOLO26-Seg model: %s", self.model_path)
         rospy.loginfo("Sync topics: %s | %s | %s", self.rgb_topic, self.depth_topic, self.camera_info_topic)
         rospy.loginfo("Output topic: %s", self.output_topic)
+        rospy.loginfo("Enable topic: %s (start_enabled=%s)", self.enable_topic, str(self.enabled))
         rospy.loginfo("conf_threshold=%.2f, print_interval=%.2fs", self.conf_threshold, self.print_interval)
+
+    def _enable_callback(self, msg):
+        new_state = bool(msg.data)
+        if new_state == self.enabled:
+            return
+        self.enabled = new_state
+        rospy.loginfo("YOLO26-Seg processing %s", "enabled" if self.enabled else "disabled")
 
     @staticmethod
     def _depth_to_meters(depth_img):
@@ -102,6 +121,9 @@ class Yolo26SegJsonNode:
         return xyz
 
     def _callback(self, rgb_msg, depth_msg, cam_info_msg):
+        if not self.enabled:
+            return
+
         now = time.time()
         if now - self._last_print < self.print_interval:
             return
