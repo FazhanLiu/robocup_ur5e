@@ -5,6 +5,15 @@
   <arg name="start_motion_control" default="true" />
   <arg name="start_brain" default="false" />
   <arg name="test_mode" default="false" />
+  <arg name="single_cycle" default="true" />
+  <arg name="path_planning_position_only" default="true" />
+  <arg name="direct_grasp_offset_x" default="0.0" />
+  <arg name="direct_grasp_offset_y" default="0.0" />
+  <arg name="direct_grasp_offset_z" default="0.02" />
+  <arg name="direct_grasp_min_z" default="0.05" />
+  <arg name="direct_grasp_max_z" default="1.20" />
+  <arg name="direct_motion_max_velocity" default="0.6" />
+  <arg name="direct_motion_max_acceleration" default="0.6" />
   <param name="ros_master_uri" value="$(arg ros_master_uri)" />
 
   <!-- Brain 容器启动时一并拉起 motion_control，并在进程退出时自动重启 -->
@@ -14,5 +23,14 @@
   <node name="robocup_brain" pkg="robocup_brain" type="brain_node.py" output="screen" respawn="true" respawn_delay="2.0" if="$(arg start_brain)">
     <param name="update_rate" value="10.0" />
     <param name="test_mode" value="$(arg test_mode)" />
+    <param name="single_cycle" value="$(arg single_cycle)" />
+    <param name="path_planning_position_only" value="$(arg path_planning_position_only)" />
+    <param name="direct_grasp_offset_x" value="$(arg direct_grasp_offset_x)" />
+    <param name="direct_grasp_offset_y" value="$(arg direct_grasp_offset_y)" />
+    <param name="direct_grasp_offset_z" value="$(arg direct_grasp_offset_z)" />
+    <param name="direct_grasp_min_z" value="$(arg direct_grasp_min_z)" />
+    <param name="direct_grasp_max_z" value="$(arg direct_grasp_max_z)" />
+    <param name="direct_motion_max_velocity" value="$(arg direct_motion_max_velocity)" />
+    <param name="direct_motion_max_acceleration" value="$(arg direct_motion_max_acceleration)" />
   </node>
 </launch>

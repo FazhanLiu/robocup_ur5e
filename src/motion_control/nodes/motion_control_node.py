@@ -16,10 +16,15 @@ import threading
 from typing import List, Optional, Tuple
 
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
-from std_msgs.msg import Float64MultiArray, Bool
+from std_msgs.msg import Float64MultiArray, Bool, String
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
+from control_msgs.msg import (
+    FollowJointTrajectoryAction,
+    FollowJointTrajectoryGoal,
+    JointTrajectoryControllerState,
+)
+from std_srvs.srv import Trigger, TriggerResponse
 from common_msgs.msg import (
     MotionCommand,
     GraspResult,
@@ -132,6 +137,7 @@ class MotionControlNode:
         self._moveit_ik_proxy = None  # lazy init when first needed
         self._execution_lock = threading.RLock()
         self._active_execution_source = None
+        self._gripper_lock = threading.RLock()
 
         # Action client for trajectory execution (Gazebo UR5e controller)
         self.trajectory_client = actionlib.SimpleActionClient(
@@ -141,6 +147,36 @@ class MotionControlNode:
         rospy.loginfo("[MotionControl] Waiting for trajectory action server...")
         if not self.trajectory_client.wait_for_server(timeout=rospy.Duration(5.0)):
             rospy.logwarn("[MotionControl] Trajectory action server not found. Gazebo UR5e may not be running.")
+
+        # Gripper control uses the real controller interface exposed by Gazebo.
+        self.gripper_action_name = rospy.get_param(
+            '~gripper_action_name',
+            '/gripper_controller/follow_joint_trajectory',
+        )
+        self.gripper_joint_name = rospy.get_param(
+            '~gripper_joint_name',
+            'robotiq_85_left_knuckle_joint',
+        )
+        self.gripper_open_position = float(rospy.get_param('~gripper_open_position', 0.0))
+        self.gripper_closed_position = float(rospy.get_param('~gripper_closed_position', 0.6))
+        self.gripper_motion_time = float(rospy.get_param('~gripper_motion_time', 1.0))
+        self.gripper_wait_timeout = float(rospy.get_param('~gripper_wait_timeout', 3.0))
+        self.gripper_position_tolerance = float(rospy.get_param('~gripper_position_tolerance', 0.03))
+        self.gripper_client = actionlib.SimpleActionClient(
+            self.gripper_action_name,
+            FollowJointTrajectoryAction,
+        )
+        self._gripper_server_reported = False
+        self._latest_gripper_state = None
+        rospy.loginfo(
+            "[MotionControl] Gripper config: action=%s joint=%s open=%.3f closed=%.3f motion_time=%.2fs tol=%.3f",
+            self.gripper_action_name,
+            self.gripper_joint_name,
+            self.gripper_open_position,
+            self.gripper_closed_position,
+            self.gripper_motion_time,
+            self.gripper_position_tolerance,
+        )
         
         # ROS interfaces
         self._setup_subscribers()
@@ -249,6 +285,20 @@ class MotionControlNode:
             queue_size=10
         )
 
+        self.gripper_command_sub = rospy.Subscriber(
+            '/gripper/command',
+            String,
+            self._gripper_command_callback,
+            queue_size=10,
+        )
+
+        self.gripper_state_sub = rospy.Subscriber(
+            '/gripper_controller/state',
+            JointTrajectoryControllerState,
+            self._gripper_state_callback,
+            queue_size=1,
+        )
+
         self.capture_result_sub = rospy.Subscriber(
             '/camera/capture_result',
             Bool,
@@ -278,6 +328,12 @@ class MotionControlNode:
             latch=True
         )
 
+        self.gripper_result_pub = rospy.Publisher(
+            '/gripper/grasp_result',
+            Bool,
+            queue_size=1,
+        )
+
 
     def _setup_services(self):
         """
@@ -288,7 +344,16 @@ class MotionControlNode:
         - IK service: end_effector_pose -> joint_angles
         - Jacobian service: compute Jacobian matrix
         """
-        pass
+        self.gripper_grasp_srv = rospy.Service(
+            '/gripper/grasp',
+            Trigger,
+            self._handle_gripper_grasp,
+        )
+        self.gripper_release_srv = rospy.Service(
+            '/gripper/release',
+            Trigger,
+            self._handle_gripper_release,
+        )
 
     def _setup_action_servers(self):
         self.execute_trajectory_server = actionlib.SimpleActionServer(
@@ -609,6 +674,134 @@ class MotionControlNode:
             rospy.loginfo("[MotionControl] Successful Shot")
         else:
             rospy.logwarn("[MotionControl] Failed")
+
+    def _gripper_state_callback(self, msg: JointTrajectoryControllerState):
+        self._latest_gripper_state = msg
+
+    def _get_gripper_actual_position(self, timeout_sec: float = 0.5) -> Optional[float]:
+        state = self._latest_gripper_state
+        if state is not None and state.actual.positions:
+            return float(state.actual.positions[0])
+        try:
+            state = rospy.wait_for_message(
+                '/gripper_controller/state',
+                JointTrajectoryControllerState,
+                timeout=timeout_sec,
+            )
+            self._latest_gripper_state = state
+            if state.actual.positions:
+                return float(state.actual.positions[0])
+        except rospy.ROSException:
+            return None
+        return None
+
+    def _gripper_reached_position(self, target: float, retries: int = 3, timeout_sec: float = 0.4) -> Tuple[bool, Optional[float]]:
+        for _ in range(retries):
+            actual = self._get_gripper_actual_position(timeout_sec=timeout_sec)
+            if actual is not None and abs(actual - target) <= self.gripper_position_tolerance:
+                return True, actual
+            rospy.sleep(0.1)
+        return False, actual if 'actual' in locals() else None
+
+    def _ensure_gripper_server(self, timeout_sec: Optional[float] = None) -> bool:
+        timeout = self.gripper_wait_timeout if timeout_sec is None else float(timeout_sec)
+        if self.gripper_client.wait_for_server(timeout=rospy.Duration(timeout)):
+            if not self._gripper_server_reported:
+                rospy.loginfo(
+                    "[MotionControl] Gripper action server connected: %s",
+                    self.gripper_action_name,
+                )
+                self._gripper_server_reported = True
+            return True
+
+        rospy.logwarn_throttle(
+            5.0,
+            "[MotionControl] Gripper action server unavailable: %s",
+            self.gripper_action_name,
+        )
+        return False
+
+    def _send_gripper_position(self, position: float, label: str) -> Tuple[bool, str]:
+        if not self._ensure_gripper_server():
+            return False, f"Gripper action server unavailable: {self.gripper_action_name}"
+
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory = JointTrajectory()
+        goal.trajectory.joint_names = [self.gripper_joint_name]
+
+        point = JointTrajectoryPoint()
+        point.positions = [float(position)]
+        point.time_from_start = rospy.Duration(max(0.1, self.gripper_motion_time))
+        goal.trajectory.points.append(point)
+
+        timeout = point.time_from_start.to_sec() + self.gripper_wait_timeout
+        with self._gripper_lock:
+            self.gripper_client.send_goal(goal)
+            if not self.gripper_client.wait_for_result(timeout=rospy.Duration(timeout)):
+                self.gripper_client.cancel_goal()
+                return False, f"{label} timed out"
+
+            state = self.gripper_client.get_state()
+            result = self.gripper_client.get_result()
+
+        if state != action_msgs.GoalStatus.SUCCEEDED:
+            reached, actual = self._gripper_reached_position(float(position))
+            if reached:
+                return True, (
+                    f"{label} reached target within tolerance "
+                    f"(controller state {state}, actual={actual:.4f})"
+                )
+            error_text = result.error_string if result is not None and hasattr(result, "error_string") else ""
+            return False, f"{label} failed with controller state {state} {error_text}".strip()
+
+        return True, f"{label} completed"
+
+    def _execute_gripper_grasp(self) -> bool:
+        success, message = self._send_gripper_position(
+            self.gripper_closed_position,
+            "Gripper grasp",
+        )
+        self.gripper_result_pub.publish(Bool(data=success))
+        if success:
+            rospy.loginfo("[MotionControl] %s", message)
+        else:
+            rospy.logwarn("[MotionControl] %s", message)
+        return success
+
+    def _execute_gripper_release(self) -> bool:
+        success, message = self._send_gripper_position(
+            self.gripper_open_position,
+            "Gripper release",
+        )
+        if success:
+            self.gripper_result_pub.publish(Bool(data=False))
+            rospy.loginfo("[MotionControl] %s", message)
+        else:
+            rospy.logwarn("[MotionControl] %s", message)
+        return success
+
+    def _gripper_command_callback(self, msg: String):
+        command = msg.data.lower().strip()
+        if command in ('grasp', 'close'):
+            self._execute_gripper_grasp()
+        elif command in ('release', 'open'):
+            self._execute_gripper_release()
+        else:
+            rospy.logwarn("[MotionControl] Unknown gripper command: %s", msg.data)
+
+    def _handle_gripper_grasp(self, _req):
+        success = self._execute_gripper_grasp()
+        return TriggerResponse(
+            success=success,
+            message="grasp_success" if success else "grasp_failed",
+        )
+
+    def _handle_gripper_release(self, _req):
+        success = self._execute_gripper_release()
+        return TriggerResponse(
+            success=success,
+            message="release_success" if success else "release_failed",
+        )
 
     def motion_command_callback(self, msg: MotionCommand):
         """
@@ -1010,25 +1203,47 @@ class MotionControlNode:
         if not self.trajectory_client.wait_for_server(timeout=rospy.Duration(1.0)):
             return False, ExecuteTrajectoryResult.EXECUTION_FAILED, "Trajectory action server unavailable"
 
+        raw_duration = trajectory.points[-1].time_from_start.to_sec()
         command = self._scale_trajectory_timing(trajectory, max_velocity, max_acceleration)
         if not command.joint_names:
             command.joint_names = self.joint_names
+        scaled_duration = command.points[-1].time_from_start.to_sec()
         goal = FollowJointTrajectoryGoal()
         goal.trajectory = command
+        rospy.loginfo(
+            "[MotionControl] Sending FollowJointTrajectory goal: points=%d raw_duration=%.2fs scaled_duration=%.2fs vel_scale=%.2f acc_scale=%.2f",
+            len(command.points),
+            raw_duration,
+            scaled_duration,
+            max_velocity,
+            max_acceleration,
+        )
         self.trajectory_client.send_goal(goal)
+        rospy.loginfo("[MotionControl] FollowJointTrajectory goal sent to controller")
         if feedback_cb is not None:
             feedback_cb(ExecuteTrajectoryFeedback.EXECUTING, "Trajectory executing")
 
         timeout_sec = max(60.0, command.points[-1].time_from_start.to_sec() + 5.0)
         start_time = rospy.Time.now()
+        last_wait_log = start_time
 
         while not rospy.is_shutdown():
             if preempt_check is not None and preempt_check():
                 self.trajectory_client.cancel_goal()
                 return False, ExecuteTrajectoryResult.PREEMPTED, "Trajectory execution preempted"
 
+            now = rospy.Time.now()
+            if (now - last_wait_log).to_sec() >= 2.0:
+                rospy.loginfo(
+                    "[MotionControl] Waiting for controller result... elapsed=%.1fs / timeout=%.1fs",
+                    (now - start_time).to_sec(),
+                    timeout_sec,
+                )
+                last_wait_log = now
+
             if self.trajectory_client.wait_for_result(timeout=rospy.Duration(0.1)):
                 state = self.trajectory_client.get_state()
+                rospy.loginfo("[MotionControl] Controller finished with state=%d", state)
                 if state == action_msgs.GoalStatus.SUCCEEDED:
                     return True, ExecuteTrajectoryResult.SUCCEEDED, "Trajectory completed"
                 return False, ExecuteTrajectoryResult.EXECUTION_FAILED, (
@@ -1055,6 +1270,19 @@ class MotionControlNode:
             return
 
         try:
+            traj_points = len(goal.trajectory.points)
+            traj_duration = (
+                goal.trajectory.points[-1].time_from_start.to_sec()
+                if traj_points > 0
+                else 0.0
+            )
+            rospy.loginfo(
+                "[MotionControl] /motion_control/execute_trajectory accepted: points=%d duration=%.2fs vel_scale=%.2f acc_scale=%.2f",
+                traj_points,
+                traj_duration,
+                goal.max_velocity,
+                goal.max_acceleration,
+            )
             self._publish_execute_feedback(ExecuteTrajectoryFeedback.ACCEPTED, "Trajectory accepted")
             success, status, message = self._execute_trajectory_sync(
                 goal.trajectory,
@@ -1062,6 +1290,12 @@ class MotionControlNode:
                 max_acceleration=goal.max_acceleration,
                 preempt_check=self.execute_trajectory_server.is_preempt_requested,
                 feedback_cb=self._publish_execute_feedback,
+            )
+            rospy.loginfo(
+                "[MotionControl] /motion_control/execute_trajectory finished: success=%s status=%d message=%s",
+                str(success),
+                status,
+                message,
             )
             result.success = success
             result.status = status

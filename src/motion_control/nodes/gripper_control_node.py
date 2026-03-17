@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-夹爪力控制节点 - 使用 GripperCommand Action 通信
+夹爪控制节点 - 使用 Gazebo 暴露的单关节 FollowJointTrajectory 接口
 - 提供 grasp / release 命令（Topic + Service）
-- 力控制夹取，根据 result.stalled 判断夹取成功
+- 对接 /gripper_controller/follow_joint_trajectory
 - 发布 /gripper/grasp_result (Bool)
 """
 
 import rospy
 import actionlib
-from control_msgs.msg import GripperCommandAction, GripperCommandGoal
+from control_msgs.msg import (
+    FollowJointTrajectoryAction,
+    FollowJointTrajectoryGoal,
+    JointTrajectoryControllerState,
+)
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger, TriggerResponse
+import actionlib_msgs.msg as action_msgs
 
-# Robotiq 85: arm_gazebo 模型关节方向与标准相反，故对调
-# 0=张开, 0.79=闭合（适配 arm_gazebo URDF）
-GRIPPER_CLOSED = 0.79
+# Robotiq 85 单关节控制量，当前仿真里 0=张开，约 0.6=闭合
+GRIPPER_CLOSED = 0.6
 GRIPPER_OPEN = 0.0
-DEFAULT_MAX_EFFORT = 100.0
+DEFAULT_MOVE_TIME = 1.0
 
 
 class GripperControlNode:
@@ -25,18 +30,20 @@ class GripperControlNode:
         rospy.init_node('gripper_control', anonymous=False)
 
         self.action_name = rospy.get_param(
-            '~gripper_action', '/gripper_controller/gripper_cmd'
+            '~gripper_action', '/gripper_controller/follow_joint_trajectory'
         )
-        self.max_effort = rospy.get_param('~max_effort', DEFAULT_MAX_EFFORT)
+        self.gripper_joint_name = rospy.get_param(
+            '~gripper_joint_name',
+            'robotiq_85_left_knuckle_joint',
+        )
+        self.move_time = float(rospy.get_param('~move_time', DEFAULT_MOVE_TIME))
+        self.position_tolerance = float(rospy.get_param('~position_tolerance', 0.03))
 
         self.client = actionlib.SimpleActionClient(
-            self.action_name, GripperCommandAction
+            self.action_name, FollowJointTrajectoryAction
         )
-        rospy.loginfo("[GripperControl] Waiting for action %s...", self.action_name)
-        if not self.client.wait_for_server(rospy.Duration(10.0)):
-            rospy.logerr("[GripperControl] Action server not available!")
-            raise rospy.ROSException("Gripper action server timeout")
-        rospy.loginfo("[GripperControl] Connected to gripper action server.")
+        self.server_connected = False
+        self.latest_state = None
 
         self.result_pub = rospy.Publisher(
             '/gripper/grasp_result', Bool, queue_size=1
@@ -47,6 +54,57 @@ class GripperControlNode:
         self.grasp_srv = rospy.Service(
             '/gripper/grasp', Trigger, self._grasp_service
         )
+        self.state_sub = rospy.Subscriber(
+            '/gripper_controller/state',
+            JointTrajectoryControllerState,
+            self._state_callback,
+            queue_size=1,
+        )
+
+        rospy.loginfo(
+            "[GripperControl] Ready. Will connect to action %s on demand for joint %s.",
+            self.action_name,
+            self.gripper_joint_name,
+        )
+
+    def _ensure_server(self, timeout_sec=0.2):
+        if self.server_connected:
+            return True
+
+        if self.client.wait_for_server(rospy.Duration(timeout_sec)):
+            self.server_connected = True
+            rospy.loginfo("[GripperControl] Connected to action server: %s", self.action_name)
+            return True
+
+        rospy.logwarn_throttle(5.0, "[GripperControl] Action server unavailable: %s", self.action_name)
+        return False
+
+    def _state_callback(self, msg):
+        self.latest_state = msg
+
+    def _get_actual_position(self, timeout_sec=0.5):
+        if self.latest_state is not None and self.latest_state.actual.positions:
+            return float(self.latest_state.actual.positions[0])
+        try:
+            msg = rospy.wait_for_message(
+                '/gripper_controller/state',
+                JointTrajectoryControllerState,
+                timeout=timeout_sec,
+            )
+            self.latest_state = msg
+            if msg.actual.positions:
+                return float(msg.actual.positions[0])
+        except rospy.ROSException:
+            return None
+        return None
+
+    def _reached_target(self, target):
+        for _ in range(3):
+            actual = self._get_actual_position(timeout_sec=0.4)
+            if actual is not None and abs(actual - target) <= self.position_tolerance:
+                return True
+            rospy.sleep(0.1)
+        return False
 
     def _cmd_callback(self, msg):
         cmd = msg.data.lower().strip()
@@ -64,36 +122,65 @@ class GripperControlNode:
 
     def _do_grasp(self):
         """执行力控制夹取，返回 True 表示夹到物体，False 表示空夹"""
-        goal = GripperCommandGoal()
-        goal.command.position = GRIPPER_CLOSED
-        goal.command.max_effort = self.max_effort
+        if not self._ensure_server():
+            self.result_pub.publish(Bool(data=False))
+            return False
+
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory = JointTrajectory()
+        goal.trajectory.joint_names = [self.gripper_joint_name]
+        point = JointTrajectoryPoint()
+        point.positions = [GRIPPER_CLOSED]
+        point.time_from_start = rospy.Duration(max(0.1, self.move_time))
+        goal.trajectory.points.append(point)
 
         self.client.send_goal(goal)
-        self.client.wait_for_result()
-        result = self.client.get_result()
+        if not self.client.wait_for_result(rospy.Duration(point.time_from_start.to_sec() + 2.0)):
+            self.client.cancel_goal()
+            self.result_pub.publish(Bool(data=False))
+            rospy.logwarn("[GripperControl] Grasp timed out.")
+            return False
 
-        # stalled=True: 夹爪遇到阻力停止 -> 夹取成功
-        # reached_goal=True 且 stalled=False: 空闭合 -> 夹取失败
-        grasp_success = result.stalled
+        state = self.client.get_state()
+        grasp_success = state == action_msgs.GoalStatus.SUCCEEDED
+        if not grasp_success:
+            grasp_success = self._reached_target(GRIPPER_CLOSED)
         self.result_pub.publish(Bool(data=grasp_success))
 
         rospy.loginfo(
-            "[GripperControl] Grasp: %s (stalled=%s, reached_goal=%s)",
-            "SUCCESS" if grasp_success else "EMPTY",
-            result.stalled,
-            result.reached_goal
+            "[GripperControl] Grasp: %s (state=%s)",
+            "SUCCESS" if grasp_success else "FAILED",
+            state,
         )
         return grasp_success
 
     def _do_release(self):
         """张开夹爪"""
-        goal = GripperCommandGoal()
-        goal.command.position = GRIPPER_OPEN
-        goal.command.max_effort = self.max_effort
+        if not self._ensure_server():
+            return False
+
+        goal = FollowJointTrajectoryGoal()
+        goal.trajectory = JointTrajectory()
+        goal.trajectory.joint_names = [self.gripper_joint_name]
+        point = JointTrajectoryPoint()
+        point.positions = [GRIPPER_OPEN]
+        point.time_from_start = rospy.Duration(max(0.1, self.move_time))
+        goal.trajectory.points.append(point)
 
         self.client.send_goal(goal)
-        self.client.wait_for_result()
-        rospy.loginfo("[GripperControl] Release completed.")
+        if not self.client.wait_for_result(rospy.Duration(point.time_from_start.to_sec() + 2.0)):
+            self.client.cancel_goal()
+            rospy.logwarn("[GripperControl] Release timed out.")
+            return False
+        state = self.client.get_state()
+        release_success = state == action_msgs.GoalStatus.SUCCEEDED
+        if not release_success:
+            release_success = self._reached_target(GRIPPER_OPEN)
+        if release_success:
+            rospy.loginfo("[GripperControl] Release completed.")
+        else:
+            rospy.logwarn("[GripperControl] Release failed (state=%s).", state)
+        return release_success
 
 
 def main():

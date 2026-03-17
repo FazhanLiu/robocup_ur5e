@@ -4,11 +4,25 @@
   <arg name="robot_name" default="ur5e"/>
   <arg name="base_frame" default="base_link"/>
   <arg name="ee_frame" default="tool0"/>
+  <arg name="gripper_action_name" default="/gripper_controller/follow_joint_trajectory"/>
+  <arg name="gripper_joint_name" default="robotiq_85_left_knuckle_joint"/>
+  <arg name="gripper_open_position" default="0.0"/>
+  <arg name="gripper_closed_position" default="0.6"/>
+  <arg name="gripper_motion_time" default="1.0"/>
+  <arg name="gripper_wait_timeout" default="3.0"/>
+  <arg name="gripper_position_tolerance" default="0.03"/>
   
   <node name="motion_control" pkg="motion_control" type="motion_control_node.py" output="screen" respawn="true" respawn_delay="2.0">
     <param name="robot_name" value="$(arg robot_name)"/>
     <param name="base_frame" value="$(arg base_frame)"/>
     <param name="ee_frame" value="$(arg ee_frame)"/>
+    <param name="gripper_action_name" value="$(arg gripper_action_name)"/>
+    <param name="gripper_joint_name" value="$(arg gripper_joint_name)"/>
+    <param name="gripper_open_position" value="$(arg gripper_open_position)"/>
+    <param name="gripper_closed_position" value="$(arg gripper_closed_position)"/>
+    <param name="gripper_motion_time" value="$(arg gripper_motion_time)"/>
+    <param name="gripper_wait_timeout" value="$(arg gripper_wait_timeout)"/>
+    <param name="gripper_position_tolerance" value="$(arg gripper_position_tolerance)"/>
     
     <rosparam file="$(find motion_control)/config/ur5e_config.yaml" command="load"/>
   </node>

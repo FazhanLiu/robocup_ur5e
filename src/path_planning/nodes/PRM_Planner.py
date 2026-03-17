@@ -139,6 +139,10 @@ class PRMPlannerNode:
         self.clear_octomap_on_failure = rospy.get_param("~clear_octomap_on_failure", True)
         self.publish_plan_markers = rospy.get_param("~publish_plan_markers", True)
         self.save_plan_plot = rospy.get_param("~save_plan_plot", True)
+        self.compute_ee_path_points = rospy.get_param(
+            "~compute_ee_path_points",
+            self.publish_plan_markers or self.save_plan_plot,
+        )
         self.plan_plot_path = rospy.get_param("~plan_plot_path", "/tmp/prm_plan_plot.png")
         self.allow_gripper_internal_collisions = rospy.get_param("~allow_gripper_internal_collisions", True)
         self.gripper_internal_collision_pairs = rospy.get_param(
@@ -251,9 +255,10 @@ class PRMPlannerNode:
             str(self.clear_octomap_on_failure),
         )
         rospy.loginfo(
-            "[PRM] Visualization: publish_markers=%s save_plot=%s plot_path=%s",
+            "[PRM] Visualization: publish_markers=%s save_plot=%s compute_ee_path_points=%s plot_path=%s",
             str(self.publish_plan_markers),
             str(self.save_plan_plot),
+            str(self.compute_ee_path_points),
             self.plan_plot_path,
         )
         rospy.loginfo(
@@ -393,12 +398,28 @@ class PRMPlannerNode:
         execute_goal.trajectory = robot_traj.joint_trajectory
         execute_goal.max_velocity = self.execute_max_velocity
         execute_goal.max_acceleration = self.execute_max_acceleration
+        traj_points = len(robot_traj.joint_trajectory.points)
+        traj_duration = (
+            robot_traj.joint_trajectory.points[-1].time_from_start.to_sec()
+            if traj_points > 0
+            else 0.0
+        )
 
         self._publish_plan_execute_feedback(
             PlanExecutePoseFeedback.EXECUTING,
             "Executing trajectory via motion_control",
         )
+        rospy.loginfo(
+            "[PRM] Sending trajectory to motion_control: points=%d duration=%.2fs vel_scale=%.2f acc_scale=%.2f",
+            traj_points,
+            traj_duration,
+            self.execute_max_velocity,
+            self.execute_max_acceleration,
+        )
         self.motion_control_client.send_goal(execute_goal)
+        rospy.loginfo("[PRM] motion_control goal sent, waiting for execution result...")
+        execute_wait_start = rospy.Time.now()
+        last_wait_log = execute_wait_start
 
         while not rospy.is_shutdown():
             if self.plan_execute_pose_server.is_preempt_requested():
@@ -412,9 +433,24 @@ class PRMPlannerNode:
                 self.plan_execute_pose_server.set_preempted(result, result.message)
                 return
 
+            now = rospy.Time.now()
+            if (now - last_wait_log).to_sec() >= 2.0:
+                rospy.loginfo(
+                    "[PRM] Waiting for motion_control execution result... elapsed=%.1fs",
+                    (now - execute_wait_start).to_sec(),
+                )
+                last_wait_log = now
+
             if self.motion_control_client.wait_for_result(timeout=rospy.Duration(0.1)):
                 motion_result = self.motion_control_client.get_result()
                 motion_state = self.motion_control_client.get_state()
+                rospy.loginfo(
+                    "[PRM] motion_control execution finished: state=%d success=%s status=%s message=%s",
+                    motion_state,
+                    str(motion_result.success if motion_result is not None else False),
+                    str(motion_result.status if motion_result is not None else "None"),
+                    motion_result.message if motion_result is not None else "no result",
+                )
 
                 if motion_state == action_msgs.GoalStatus.SUCCEEDED and motion_result is not None and motion_result.success:
                     result = self._make_plan_execute_result(
@@ -1089,7 +1125,7 @@ class PRMPlannerNode:
 
         publish_display_trajectory(self.robot, robot_traj)
         rospy.loginfo("[PRM] Published planned trajectory to /move_group/display_planned_path")
-        ee_points = self._ee_points_from_traj(robot_traj)
+        ee_points = self._ee_points_from_traj(robot_traj) if self.compute_ee_path_points else []
         self._publish_plan_markers(ee_points, pose_stamped, True, label, "planned")
         self._save_plan_plot(ee_points, pose_stamped, True, label, "planned")
 
