@@ -2,18 +2,20 @@
 """
 RoboCup Brain Node - behavior-tree based task orchestration.
 
-Current pick flow:
+Current pick and place flow:
   1. Move to the overview joint pose once.
   2. Open gripper once.
   3. Pick the best YOLO target that is not blacklisted.
   4. Build a direct grasp pose from YOLO 3D position.
-  5. Try path_planning first.
+  5. Try path_planning first to approach the grasp pose.
   6. If path_planning fails, fall back to direct motion_control MOVE_TO_POSE.
-  7. If both fail, blacklist the target and try another one.
-  8. After reaching the target, close gripper and stop on success.
+  7. Verify the object is really held.
+  8. Move to the selected trash bin joint pose and verify the object is still held.
+  9. Release at the bin and stop on success.
 """
 
 import json
+import re
 
 import actionlib
 import actionlib_msgs.msg as action_msgs
@@ -162,6 +164,23 @@ def blacklist_current_target(reason):
     clear_target_selection()
 
 
+def prepare_retry_from_overview(reason, blacklist=False):
+    blackboard = get_blackboard()
+    if blacklist:
+        blacklist_current_target(reason)
+    else:
+        rospy.logwarn("[Brain] Recovery requested | reason=%s", reason)
+        blackboard.set("last_target_failure_reason", reason)
+        clear_target_selection()
+
+    blackboard.set("overview_done", False)
+    blackboard.set("holding_object", False)
+    blackboard.set("executed_trajectory", None)
+    blackboard.set("task_retry_requested", True)
+    blackboard.set("task_retry_reason", reason)
+    clear_terminal_failure()
+
+
 class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
     """Move to the fixed overview joint pose once, then open the gripper once."""
 
@@ -187,6 +206,22 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
         self.command_sent = False
         self.last_result = None
         self.release_done = False
+
+    def _release_response_usable(self, message):
+        text = str(message or "")
+        lowered = text.lower()
+        if "partial-open" in lowered or "accepted as partial-open" in lowered:
+            return True
+
+        min_closed_error = float(rospy.get_param("~release_min_closed_error", 0.25))
+        match = re.search(r"goal error\s+([-\d\.eE]+)", text)
+        if match is None:
+            return False
+        try:
+            goal_error = float(match.group(1))
+        except ValueError:
+            return False
+        return abs(goal_error) >= min_closed_error
 
     def _motion_result_callback(self, msg):
         self.last_result = msg
@@ -225,6 +260,12 @@ class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
             response = self.gripper_release_srv()
             if response.success:
                 rospy.loginfo("[Brain] Stage action: open gripper at poseToTakePics")
+                return True
+            if self._release_response_usable(response.message):
+                rospy.logwarn(
+                    "[Brain] Open gripper accepted as usable even though release returned failure: %s",
+                    response.message,
+                )
                 return True
             rospy.logerr("[Brain] Failed to open gripper at poseToTakePics: %s", response.message)
             return False
@@ -642,7 +683,7 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
 
 
 class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
-    """Try path planning first, then fall back to direct motion, then close gripper."""
+    """Approach, grasp, carry to bin, verify carry, then release."""
 
     def __init__(self, name="ExecutePickAndPlace"):
         super().__init__(name)
@@ -653,13 +694,20 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
         )
         self.gripper_cmd_pub = rospy.Publisher("/gripper/command", String, queue_size=1)
         self.gripper_grasp_srv = rospy.ServiceProxy("/gripper/grasp", Trigger)
+        self.gripper_release_srv = rospy.ServiceProxy("/gripper/release", Trigger)
+        self.gripper_is_holding_srv = rospy.ServiceProxy("/gripper/is_holding", Trigger)
         self.goal_sent = False
         self.direct_motion_sent = False
+        self.bin_motion_sent = False
         self.mock_done = False
         self.last_feedback_stage = None
         self.last_motion_result = None
         self.motion_result_count = 0
         self.direct_motion_start_count = 0
+        self.bin_motion_start_count = 0
+        self.phase = "approach"
+        self.place_bin_color = "green"
+        self.place_bin_joints = []
 
     def setup(self, timeout=None):
         if is_test_mode():
@@ -687,17 +735,56 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
     def initialise(self):
         self.goal_sent = False
         self.direct_motion_sent = False
+        self.bin_motion_sent = False
         self.mock_done = False
         self.last_feedback_stage = None
         self.direct_motion_start_count = self.motion_result_count
-        log_stage("PathPlanning")
+        self.bin_motion_start_count = self.motion_result_count
+        self.phase = "approach"
+        self.place_bin_color = normalize_label(rospy.get_param("~place_bin_color", "green")) or "green"
+        self.place_bin_joints = self._get_bin_joints(self.place_bin_color)
+        log_stage("ApproachTarget")
         target_object = blackboard_get("target_object", {}) or {}
         target_label = (
             target_object.get("name", "unknown")
             if isinstance(target_object, dict)
             else str(target_object)
         )
-        rospy.loginfo("[Brain] Current grasp target label: %s", target_label)
+        rospy.loginfo(
+            "[Brain] Current grasp target label: %s | place_bin=%s",
+            target_label,
+            self.place_bin_color,
+        )
+
+    def _get_bin_joints(self, bin_color):
+        defaults = {
+            "green": [-0.4696, -1.1530, -1.6126, 1.1743, 1.5815, -0.4750],
+            "blue": [1.4744, -1.0557, -1.4196, 0.9190, 1.5769, 1.4693],
+        }
+        resolved_color = normalize_label(bin_color)
+        if resolved_color not in defaults:
+            rospy.logwarn(
+                "[Brain] Unknown place_bin_color '%s', falling back to green",
+                bin_color,
+            )
+            resolved_color = "green"
+        values = rospy.get_param("~%s_bin_joints" % resolved_color, defaults[resolved_color])
+        joints = [float(v) for v in values]
+        if len(joints) != 6:
+            raise ValueError("%s_bin_joints must contain 6 joint values" % resolved_color)
+        self.place_bin_color = resolved_color
+        return joints
+
+    @staticmethod
+    def _is_interface_failure(message):
+        text = str(message).lower()
+        return (
+            "unavailable" in text
+            or "not reachable" in text
+            or "timeout" in text and "gripper" in text
+            or "no gripper" in text
+            or text.startswith("unknown:")
+        )
 
     def _call_gripper_grasp(self):
         try:
@@ -715,6 +802,40 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
                 )
                 return True, "grasp_command_published"
             return False, "gripper grasp interface unavailable"
+
+    def _call_gripper_release(self):
+        try:
+            rospy.wait_for_service("/gripper/release", timeout=0.5)
+            response = self.gripper_release_srv()
+            if response.success:
+                rospy.loginfo("[Brain] Stage action: command gripper release")
+                return True, response.message or "release_success"
+            return False, response.message or "release_failed"
+        except (rospy.ROSException, rospy.ServiceException):
+            if self.gripper_cmd_pub.get_num_connections() > 0:
+                self.gripper_cmd_pub.publish(String(data="release"))
+                rospy.logwarn(
+                    "[Brain] /gripper/release service unavailable, published release command instead"
+                )
+                return True, "release_command_published"
+            return False, "gripper release interface unavailable"
+
+    def _check_holding_state(self, context):
+        try:
+            rospy.wait_for_service("/gripper/is_holding", timeout=0.5)
+            response = self.gripper_is_holding_srv()
+        except (rospy.ROSException, rospy.ServiceException):
+            return None, "gripper holding interface unavailable"
+
+        if response.success:
+            rospy.loginfo("[Brain] Holding check passed (%s): %s", context, response.message)
+            return True, response.message or "holding"
+
+        message = response.message or "released"
+        if str(message).lower().startswith("unknown:"):
+            return None, message
+        rospy.logwarn("[Brain] Holding check failed (%s): %s", context, message)
+        return False, message
 
     def _send_direct_motion_goal(self, target_pose, reason):
         if self.motion_cmd_pub.get_num_connections() == 0:
@@ -740,18 +861,51 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
         self.direct_motion_sent = True
         return True
 
-    def _handle_reach_success(self, completion_label, trajectory=None):
-        success, message = self._call_gripper_grasp()
-        if not success:
-            set_terminal_failure(f"Gripper grasp failed: {message}")
-            rospy.logerr("[Brain] Gripper grasp failed: %s", message)
-            return Status.FAILURE
+    def _send_bin_joint_goal(self):
+        if self.motion_cmd_pub.get_num_connections() == 0:
+            return False
 
+        cmd = MotionCommand()
+        cmd.command_type = MotionCommand.MOVE_TO_JOINT
+        cmd.joint_positions = list(self.place_bin_joints)
+        cmd.max_velocity = float(rospy.get_param("~place_motion_max_velocity", 1.0))
+        cmd.max_acceleration = float(rospy.get_param("~place_motion_max_acceleration", 1.0))
+        cmd.collision_check = True
+
+        log_stage("MoveToPlaceBin")
+        rospy.loginfo(
+            "[Brain] Stage action: move to %s bin joints [%s]",
+            self.place_bin_color,
+            ", ".join(f"{joint:.4f}" for joint in self.place_bin_joints),
+        )
+        self.last_motion_result = None
+        self.bin_motion_start_count = self.motion_result_count
+        self.motion_cmd_pub.publish(cmd)
+        self.bin_motion_sent = True
+        return True
+
+    def _recover(self, reason, blacklist=False):
+        prepare_retry_from_overview(reason, blacklist=blacklist)
+        return Status.FAILURE
+
+    def _after_target_reached(self, completion_label, trajectory=None):
         blackboard = get_blackboard()
         if trajectory is not None:
             blackboard.set("executed_trajectory", trajectory)
+
+        success, message = self._call_gripper_grasp()
+        if not success:
+            if self._is_interface_failure(message):
+                set_terminal_failure(f"Gripper grasp failed: {message}")
+                rospy.logerr("[Brain] Gripper grasp failed: %s", message)
+                return Status.FAILURE
+            return self._recover(f"gripper grasp command failed: {message}", blacklist=False)
+
         rospy.loginfo("[Brain] Stage complete: %s", completion_label)
-        return Status.SUCCESS
+        rospy.sleep(float(rospy.get_param("~post_grasp_settle_time", 0.3)))
+        self.phase = "verify_grasp"
+        log_stage("VerifyGrasp")
+        return Status.RUNNING
 
     def update(self):
         if is_test_mode():
@@ -770,20 +924,85 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
             )
             return Status.FAILURE
 
+        if self.phase == "verify_grasp":
+            holding, message = self._check_holding_state("post-grasp")
+            if holding is None:
+                set_terminal_failure(f"Unable to verify grasp: {message}")
+                rospy.logerr("[Brain] Unable to verify grasp: %s", message)
+                return Status.FAILURE
+            if not holding:
+                return self._recover(f"grasp verification failed: {message}", blacklist=False)
+            blackboard.set("holding_object", True)
+            self.phase = "move_to_bin"
+            return Status.RUNNING
+
+        if self.phase == "move_to_bin":
+            if not self.bin_motion_sent:
+                if self._send_bin_joint_goal():
+                    return Status.RUNNING
+                set_terminal_failure("motion_control is not reachable for bin placement")
+                rospy.logerr("[Brain] motion_control is not reachable for bin placement")
+                return Status.FAILURE
+
+            if self.motion_result_count <= self.bin_motion_start_count:
+                return Status.RUNNING
+
+            self.bin_motion_sent = False
+            if self.last_motion_result is not None and self.last_motion_result.status == GraspResult.SUCCESS:
+                self.phase = "verify_carry"
+                log_stage("VerifyCarryToBin")
+                return Status.RUNNING
+
+            failure_message = (
+                self.last_motion_result.message
+                if self.last_motion_result is not None
+                else "bin motion failed"
+            )
+            return self._recover(
+                f"{self.place_bin_color} bin motion failed: {failure_message}",
+                blacklist=False,
+            )
+
+        if self.phase == "verify_carry":
+            holding, message = self._check_holding_state("before-release")
+            if holding is None:
+                set_terminal_failure(f"Unable to verify carry state: {message}")
+                rospy.logerr("[Brain] Unable to verify carry state: %s", message)
+                return Status.FAILURE
+            if not holding:
+                blackboard.set("holding_object", False)
+                return self._recover(f"object dropped before release: {message}", blacklist=False)
+            self.phase = "release"
+            log_stage("ReleaseToBin")
+            return Status.RUNNING
+
+        if self.phase == "release":
+            success, message = self._call_gripper_release()
+            if not success:
+                if self._is_interface_failure(message):
+                    set_terminal_failure(f"Gripper release failed: {message}")
+                    rospy.logerr("[Brain] Gripper release failed: %s", message)
+                    return Status.FAILURE
+                return self._recover(f"release at {self.place_bin_color} bin failed: {message}")
+
+            blackboard.set("holding_object", False)
+            blackboard.set("placed_bin_color", self.place_bin_color)
+            rospy.loginfo("[Brain] Stage complete: PlaceTo%sBin", self.place_bin_color.capitalize())
+            return Status.SUCCESS
+
         if self.direct_motion_sent:
             if self.motion_result_count <= self.direct_motion_start_count:
                 return Status.RUNNING
             self.direct_motion_sent = False
             if self.last_motion_result is not None and self.last_motion_result.status == GraspResult.SUCCESS:
-                return self._handle_reach_success("DirectMotionFallback")
+                return self._after_target_reached("DirectMotionFallback")
 
             failure_message = (
                 self.last_motion_result.message
                 if self.last_motion_result is not None
                 else "motion_control direct move failed"
             )
-            blacklist_current_target(f"direct motion failed: {failure_message}")
-            return Status.FAILURE
+            return self._recover(f"direct motion failed: {failure_message}", blacklist=True)
 
         if not self.goal_sent:
             if self.client is not None and self.client.wait_for_server(rospy.Duration(0.1)):
@@ -811,7 +1030,7 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
         self.goal_sent = False
 
         if state == action_msgs.GoalStatus.SUCCEEDED and result is not None and result.success:
-            return self._handle_reach_success("PathPlanning", trajectory=result.trajectory)
+            return self._after_target_reached("PathPlanning", trajectory=result.trajectory)
 
         if result is not None and result.status == PlanExecutePoseResult.PREEMPTED:
             failure_message = result.message or "path_planning preempted"
@@ -853,9 +1072,13 @@ def create_behavior_tree():
 def initialise_blackboard_state():
     blackboard = get_blackboard()
     blackboard.set("overview_done", False)
+    blackboard.set("holding_object", False)
+    blackboard.set("placed_bin_color", "")
     blackboard.set("detected_objects", [])
     blackboard.set(FAILED_TARGET_KEYS_BB, [])
     blackboard.set("last_target_failure_reason", "")
+    blackboard.set("task_retry_requested", False)
+    blackboard.set("task_retry_reason", "")
     clear_terminal_failure()
     clear_target_selection()
 
@@ -899,6 +1122,18 @@ def main():
                         reason,
                     )
                     task_finished = True
+                else:
+                    reason = blackboard_get(
+                        "task_retry_reason",
+                        blackboard_get("last_target_failure_reason", "unknown"),
+                    )
+                    rospy.logwarn(
+                        "[Brain] Non-terminal failure. Returning to overview and retrying: %s",
+                        reason,
+                    )
+                    get_blackboard().set("task_retry_requested", False)
+                    get_blackboard().set("task_retry_reason", "")
+                    root.stop(Status.INVALID)
 
             rate.sleep()
     except KeyboardInterrupt:

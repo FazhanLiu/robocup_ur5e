@@ -20,8 +20,8 @@ from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger, TriggerResponse
 import actionlib_msgs.msg as action_msgs
 
-# Robotiq 85 单关节控制量，当前仿真里 0=张开，约 0.6=闭合
-GRIPPER_CLOSED = 0.6
+# Robotiq 85 单关节控制量，当前仿真里 0=张开，0.80285 为 URDF 上限附近的完全闭合
+GRIPPER_CLOSED = 0.80285
 GRIPPER_OPEN = 0.0
 DEFAULT_MOVE_TIME = 1.0
 
