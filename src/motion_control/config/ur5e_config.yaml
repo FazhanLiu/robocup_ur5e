@@ -27,7 +27,7 @@ acceleration_limits:
   max_joint_acceleration: 6.28
 
 # Home position (joint angles in radians)
-home_position: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]
+home_position: [0.69, -0.3, 0.99, -0.69, 0.0, 0.0]
 
 # IK solver settings
 ik_solver:

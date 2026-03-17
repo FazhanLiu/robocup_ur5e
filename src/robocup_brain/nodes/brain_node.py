@@ -5,6 +5,9 @@ Architecture: py_trees_ros
 Strategy: 增量扫描 -> 优先级评估(YOLO+TF) -> 请求抓取(GraspNet) -> 放置(MoveIt)
 """
 
+import json
+import time
+
 import rospy
 import py_trees
 import py_trees_ros
@@ -12,9 +15,10 @@ from py_trees.common import Status
 
 import tf2_ros
 import tf2_geometry_msgs
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
 import actionlib
 import actionlib_msgs.msg as action_msgs
+from std_msgs.msg import String
 
 from common_msgs.msg import (
     MotionCommand,
@@ -25,15 +29,13 @@ from common_msgs.msg import (
     PlanExecutePoseFeedback,
 )
 
-try:
-    # TODO: add DetectedObjectArray to common_msgs when the perception interface is finalized.
-    from common_msgs.msg import DetectedObjectArray  # type: ignore
-except ImportError:
-    DetectedObjectArray = None
-
 
 def is_test_mode():
     return rospy.get_param("~test_mode", False)
+
+
+def get_blackboard():
+    return py_trees.blackboard.Blackboard()
 
 
 class MoveToOverviewBehavior(py_trees.behaviour.Behaviour):
@@ -86,27 +88,86 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         super().__init__(name)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-        self.latest_msg = None
+        self.latest_detections = []
+        self.latest_frame_id = ""
+        self.latest_stamp = rospy.Time(0)
         self.sub = None
         self.mock_done = False
+        self.yolo_callback_count = 0
+        self.last_yolo_wall_time = None
+        self.last_yolo_payload_size = 0
+        self.last_yolo_labels = []
 
     def setup(self, timeout=None):
         rospy.loginfo("[Brain] EvaluateTargets: Setup")
         if is_test_mode():
             rospy.loginfo("[Brain] EvaluateTargets running in test mode")
             return True
-        if DetectedObjectArray is None:
-            rospy.logwarn("[Brain] DetectedObjectArray is not available yet; EvaluateTargets will stay idle")
-            return True
         self.sub = rospy.Subscriber(
-            "/perception/detected_objects",
-            DetectedObjectArray,
+            "/perception/yolo26_seg_detections",
+            String,
             self._yolo_callback
         )
+        rospy.loginfo("[Brain] EvaluateTargets subscribed to /perception/yolo26_seg_detections")
         return True
 
     def _yolo_callback(self, msg):
-        self.latest_msg = msg
+        self.yolo_callback_count += 1
+        self.last_yolo_wall_time = time.time()
+        self.last_yolo_payload_size = len(msg.data)
+
+        try:
+            detections = json.loads(msg.data)
+        except (TypeError, ValueError) as exc:
+            rospy.logwarn_throttle(
+                2.0,
+                "[Brain] Failed to parse YOLO JSON: %s | payload_bytes=%d | preview=%s",
+                str(exc),
+                self.last_yolo_payload_size,
+                msg.data[:160],
+            )
+            return
+
+        if not isinstance(detections, list):
+            rospy.logwarn_throttle(
+                2.0,
+                "[Brain] YOLO JSON payload is not a list | type=%s | payload_bytes=%d",
+                type(detections).__name__,
+                self.last_yolo_payload_size,
+            )
+            return
+
+        self.latest_detections = detections
+        self.last_yolo_labels = [str(item.get("name", "unknown")) for item in detections if isinstance(item, dict)]
+        blackboard = get_blackboard()
+        blackboard.set("detected_objects", detections)
+
+        if not detections:
+            rospy.loginfo_throttle(
+                1.0,
+                "[Brain] YOLO callback #%d received an empty detection list",
+                self.yolo_callback_count,
+            )
+            return
+
+        first = detections[0]
+        self.latest_frame_id = str(first.get("frame_id", "")) or rospy.get_param(
+            "~perception_frame_id", "camera_rgb_optical_frame"
+        )
+        stamp_dict = first.get("gazebo_stamp", {})
+        secs = int(stamp_dict.get("secs", 0))
+        nsecs = int(stamp_dict.get("nsecs", 0))
+        self.latest_stamp = rospy.Time(secs=secs, nsecs=nsecs) if (secs or nsecs) else rospy.Time(0)
+        rospy.loginfo_throttle(
+            1.0,
+            "[Brain] YOLO callback #%d: count=%d frame_id=%s stamp=%d.%09d labels=%s",
+            self.yolo_callback_count,
+            len(detections),
+            self.latest_frame_id,
+            secs,
+            nsecs,
+            ", ".join(self.last_yolo_labels),
+        )
 
     def _score_object(self, obj_label):
         """比赛优先级打分系统"""
@@ -116,10 +177,26 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
             "yellow_can": 60, "spam": 60,          # 20分
             "green_can": 40, "blue_bottle": 40     # 10分保底
         }
-        return score_map.get(obj_label.lower(), 0)
+        return score_map.get(obj_label.lower(), 1)
 
     def initialise(self):
         self.mock_done = False
+
+    def _lookup_transform(self, frame_id, stamp):
+        try:
+            return self.tf_buffer.lookup_transform(
+                "base_link",
+                frame_id,
+                stamp,
+                rospy.Duration(0.5)
+            )
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            return self.tf_buffer.lookup_transform(
+                "base_link",
+                frame_id,
+                rospy.Time(0),
+                rospy.Duration(0.5)
+            )
 
     def update(self):
         if is_test_mode():
@@ -131,50 +208,77 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
                 self.mock_done = True
             return Status.SUCCESS
 
-        if DetectedObjectArray is None:
-            rospy.loginfo_throttle(5.0, "[Brain] Waiting for finalized perception message interface...")
-            return Status.RUNNING
-
-        if self.latest_msg is None or len(self.latest_msg.objects) == 0:
-            rospy.loginfo_throttle(2.0, "[Brain] Waiting for YOLO objects...")
+        if len(self.latest_detections) == 0:
+            if self.last_yolo_wall_time is None:
+                last_callback_text = "never"
+            else:
+                last_callback_text = f"{time.time() - self.last_yolo_wall_time:.2f}s ago"
+            rospy.loginfo_throttle(
+                2.0,
+                "[Brain] Waiting for YOLO objects... callbacks=%d, last_callback=%s, last_payload_bytes=%d",
+                self.yolo_callback_count,
+                last_callback_text,
+                self.last_yolo_payload_size,
+            )
             return Status.RUNNING
 
         best_target = None
-        highest_score = -1
+        highest_score = -1.0
+        highest_confidence = -1.0
         best_point_base_link = None
+        frame_id = self.latest_frame_id or rospy.get_param("~perception_frame_id", "camera_rgb_optical_frame")
 
-        # 尝试获取图像拍摄那一刻的 TF
         try:
-            trans = self.tf_buffer.lookup_transform(
-                "base_link", 
-                self.latest_msg.header.frame_id, 
-                self.latest_msg.header.stamp, 
-                rospy.Duration(0.5)
+            trans = self._lookup_transform(frame_id, self.latest_stamp)
+            rospy.loginfo_throttle(
+                1.0,
+                "[Brain] Evaluating YOLO list: count=%d frame_id=%s labels=%s",
+                len(self.latest_detections),
+                frame_id,
+                ", ".join(self.last_yolo_labels),
             )
             
-            # 遍历所有物体，转换坐标并打分
-            for obj in self.latest_msg.objects:
-                # 构造相机的 PointStamped
+            for obj in self.latest_detections:
+                center = obj.get("center_3d")
+                if not isinstance(center, dict):
+                    continue
+
                 pt_camera = PointStamped()
-                pt_camera.header = self.latest_msg.header
-                pt_camera.point = obj.center_point # YOLO给的相机系下的3D点
-                
-                # TF 转换到 base_link
+                pt_camera.header.frame_id = frame_id
+                pt_camera.header.stamp = trans.header.stamp
+                pt_camera.point.x = float(center.get("x", 0.0))
+                pt_camera.point.y = float(center.get("y", 0.0))
+                pt_camera.point.z = float(center.get("z", 0.0))
+
                 pt_base = tf2_geometry_msgs.do_transform_point(pt_camera, trans)
-                
-                score = self._score_object(obj.label)
-                if score > highest_score:
+
+                label = str(obj.get("name", "unknown"))
+                confidence = float(obj.get("confidence", 0.0))
+                score = self._score_object(label)
+                if score > highest_score or (score == highest_score and confidence > highest_confidence):
                     highest_score = score
+                    highest_confidence = confidence
                     best_target = obj
                     best_point_base_link = pt_base
 
             if best_target:
-                rospy.loginfo(f"[Brain] Selected Target: {best_target.label}, Score: {highest_score}")
-                # 写入黑板，供下一阶段使用
-                blackboard = py_trees.blackboard.Blackboard()
+                rospy.loginfo(
+                    "[Brain] Selected Target: %s, Score: %s, Confidence: %.3f",
+                    best_target.get("name", "unknown"),
+                    highest_score,
+                    highest_confidence,
+                )
+                blackboard = get_blackboard()
+                blackboard.set("detected_objects", list(self.latest_detections))
                 blackboard.set("target_object", best_target)
                 blackboard.set("target_point_base_link", best_point_base_link)
                 return Status.SUCCESS
+
+            rospy.logwarn_throttle(
+                2.0,
+                "[Brain] YOLO list received but no valid target survived filtering | labels=%s",
+                ", ".join(self.last_yolo_labels),
+            )
 
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             rospy.logwarn(f"[Brain] TF Error: {e}")
@@ -184,10 +288,9 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
 
 
 class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
-    """阶段3：把最佳 3D 点发给 GraspNet，等待抓取位姿 (建议用 Action/Service)"""
+    """阶段3：直接用 YOLO 3D 点构造一个简化抓取位姿"""
     def __init__(self, name="RequestGraspPose"):
         super().__init__(name)
-        # TODO: 初始化与 GraspNet 通信的 Service/Action Client
         self.request_sent = False
 
     def initialise(self):
@@ -203,30 +306,49 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
                 mock_pose.pose.position.y = -0.10
                 mock_pose.pose.position.z = 0.30
                 mock_pose.pose.orientation.w = 1.0
-                blackboard = py_trees.blackboard.Blackboard()
+                blackboard = get_blackboard()
                 blackboard.set("target_grasp_pose", mock_pose)
                 self.request_sent = True
             return Status.SUCCESS
 
-        blackboard = py_trees.blackboard.Blackboard()
+        blackboard = get_blackboard()
         target_point = blackboard.get("target_point_base_link")
         if target_point is None:
             rospy.loginfo_throttle(2.0, "[Brain] Waiting for a selected target point...")
             return Status.RUNNING
 
         if not self.request_sent:
-            rospy.loginfo(f"[Brain] Requesting GraspNet to crop and process point: {target_point.point.x:.2f}, {target_point.point.y:.2f}")
-            # 发送请求给 Muye 的节点...
+            target_object = blackboard.get("target_object") or {}
+            target_label = target_object.get("name", "unknown") if isinstance(target_object, dict) else str(target_object)
+
+            grasp_offset_x = float(rospy.get_param("~direct_grasp_offset_x", 0.0))
+            grasp_offset_y = float(rospy.get_param("~direct_grasp_offset_y", 0.0))
+            grasp_offset_z = float(rospy.get_param("~direct_grasp_offset_z", 0.02))
+
+            grasp_pose = PoseStamped()
+            grasp_pose.header.frame_id = "base_link"
+            grasp_pose.header.stamp = rospy.Time.now()
+            grasp_pose.pose.position.x = float(target_point.point.x) + grasp_offset_x
+            grasp_pose.pose.position.y = float(target_point.point.y) + grasp_offset_y
+            grasp_pose.pose.position.z = float(target_point.point.z) + grasp_offset_z
+            grasp_pose.pose.orientation = Quaternion(0.0, 0.0, 0.0, 1.0)
+
+            blackboard.set("target_grasp_pose", grasp_pose)
+            blackboard.set("target_grasp_mode", "direct_yolo_point")
+            rospy.loginfo(
+                "[Brain] Direct grasp pose from YOLO for %s: pos=(%.3f, %.3f, %.3f) offsets=(%.3f, %.3f, %.3f)",
+                target_label,
+                grasp_pose.pose.position.x,
+                grasp_pose.pose.position.y,
+                grasp_pose.pose.position.z,
+                grasp_offset_x,
+                grasp_offset_y,
+                grasp_offset_z,
+            )
             self.request_sent = True
-            return Status.RUNNING
-            
-        # 假设这里非阻塞地检查 GraspNet 算完了没有
-        # if graspnet_done:
-        #     blackboard.set("target_grasp_pose", result_pose)
-        #     self.request_sent = False
-        #     return Status.SUCCESS
-        
-        return Status.RUNNING
+            return Status.SUCCESS
+
+        return Status.SUCCESS
 
 
 class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
@@ -234,6 +356,7 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
     def __init__(self, name="ExecutePickAndPlace"):
         super().__init__(name)
         self.client = None
+        self.gripper_cmd_pub = rospy.Publisher('/gripper/command', String, queue_size=1)
         self.goal_sent = False
         self.mock_done = False
         self.last_feedback_message = None
@@ -282,9 +405,19 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
 
             goal = PlanExecutePoseGoal()
             goal.target_pose = target_pose
-            goal.position_only = rospy.get_param("~path_planning_position_only", False)
+            goal.position_only = rospy.get_param("~path_planning_position_only", True)
 
-            rospy.loginfo("[Brain] Sending target pose to path_planning action...")
+            if rospy.get_param("~open_gripper_before_pick", True):
+                self.gripper_cmd_pub.publish(String(data="release"))
+                rospy.loginfo("[Brain] Sent gripper release command before approach")
+
+            rospy.loginfo(
+                "[Brain] Sending target pose to path_planning action... pos=(%.3f, %.3f, %.3f) position_only=%s",
+                target_pose.pose.position.x,
+                target_pose.pose.position.y,
+                target_pose.pose.position.z,
+                str(goal.position_only),
+            )
             self.client.send_goal(goal, feedback_cb=self._feedback_callback)
             self.goal_sent = True
             return Status.RUNNING
@@ -299,7 +432,10 @@ class ExecutePickAndPlaceBehavior(py_trees.behaviour.Behaviour):
             result = self.client.get_result()
             self.goal_sent = False # 重置状态，为下一次抓取做准备
             if result is not None and result.success:
-                blackboard = py_trees.blackboard.Blackboard()
+                if rospy.get_param("~close_gripper_after_reach", True):
+                    self.gripper_cmd_pub.publish(String(data="grasp"))
+                    rospy.loginfo("[Brain] Sent gripper grasp command after reaching target pose")
+                blackboard = get_blackboard()
                 blackboard.set("executed_trajectory", result.trajectory)
                 rospy.loginfo("[Brain] Pick and Place SUCCESS! %s", result.message)
                 return Status.SUCCESS
