@@ -614,7 +614,7 @@ class EvaluateTargetsBehavior(py_trees.behaviour.Behaviour):
         preview_yaw = float(rospy.get_param("~direct_grasp_yaw", 0.0))
         qx, qy, qz, qw = quaternion_from_euler(preview_roll, preview_pitch, preview_yaw)
         preview_pose.pose.orientation = Quaternion(qx, qy, qz, qw)
-        preview_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.14))
+        preview_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.15))
         preview_dx, preview_dy, preview_dz = rotate_vector_by_quaternion(
             preview_pose.pose.orientation,
             (preview_local_x_offset, 0.0, 0.0),
@@ -682,7 +682,7 @@ class RequestGraspPoseBehavior(py_trees.behaviour.Behaviour):
         grasp_offset_x = float(rospy.get_param("~direct_grasp_offset_x", 0.0))
         grasp_offset_y = float(rospy.get_param("~direct_grasp_offset_y", 0.0))
         grasp_offset_z = float(rospy.get_param("~direct_grasp_offset_z", 0.0))
-        grasp_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.14))
+        grasp_local_x_offset = float(rospy.get_param("~direct_grasp_local_x_offset", 0.15))
         grasp_min_z = float(rospy.get_param("~direct_grasp_min_z", 0.05))
         grasp_max_z = float(rospy.get_param("~direct_grasp_max_z", 1.20))
         grasp_roll = float(rospy.get_param("~direct_grasp_roll", 3.141592653589793))
