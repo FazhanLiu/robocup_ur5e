@@ -20,13 +20,33 @@ from std_srvs.srv import Trigger, TriggerResponse
 from std_msgs.msg import ColorRGBA
 from common_msgs.msg import (
     ObjectScore,
-    ExecuteTrajectoryAction,
     ExecuteTrajectoryGoal,
     ExecuteTrajectoryResult,
-    PlanExecutePoseAction,
+    ExecuteTrajectoryActionGoal,
+    ExecuteTrajectoryActionResult,
+    ExecuteTrajectoryActionFeedback,
+    PlanExecutePoseGoal,
     PlanExecutePoseResult,
     PlanExecutePoseFeedback,
+    PlanExecutePoseActionGoal,
+    PlanExecutePoseActionResult,
+    PlanExecutePoseActionFeedback,
 )
+
+
+# actionlib 用 type(a.action_goal) 取消息类，故需在实例上提供消息实例（不能是类属性）
+class _ExecuteTrajectoryActionSpec:
+    def __init__(self):
+        self.action_goal = ExecuteTrajectoryActionGoal()
+        self.action_result = ExecuteTrajectoryActionResult()
+        self.action_feedback = ExecuteTrajectoryActionFeedback()
+
+
+class _PlanExecutePoseActionSpec:
+    def __init__(self):
+        self.action_goal = PlanExecutePoseActionGoal()
+        self.action_result = PlanExecutePoseActionResult()
+        self.action_feedback = PlanExecutePoseActionFeedback()
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
 from visualization_msgs.msg import Marker
 import actionlib_msgs.msg as action_msgs
@@ -114,11 +134,17 @@ class PRMPlannerNode:
 
         planning_time = rospy.get_param("~planning_time", 10.0)
         attempts = rospy.get_param("~attempts", 10)
+        self.planning_time = float(planning_time)
+        self.planning_attempts = int(attempts)
         self.execute_motion = rospy.get_param("~execute", False)
         self.clear_octomap_before_plan = rospy.get_param("~clear_octomap_before_plan", True)
         self.clear_octomap_on_failure = rospy.get_param("~clear_octomap_on_failure", True)
         self.publish_plan_markers = rospy.get_param("~publish_plan_markers", True)
         self.save_plan_plot = rospy.get_param("~save_plan_plot", True)
+        self.compute_ee_path_points = rospy.get_param(
+            "~compute_ee_path_points",
+            self.publish_plan_markers or self.save_plan_plot,
+        )
         self.plan_plot_path = rospy.get_param("~plan_plot_path", "/tmp/prm_plan_plot.png")
         self.allow_gripper_internal_collisions = rospy.get_param("~allow_gripper_internal_collisions", True)
         self.gripper_internal_collision_pairs = rospy.get_param(
@@ -146,6 +172,9 @@ class PRMPlannerNode:
         self.target_tf_rate = float(rospy.get_param("~target_tf_rate", 10.0))
         self.target_axis_length = float(rospy.get_param("~target_axis_length", 0.08))
         self.target_axis_width = float(rospy.get_param("~target_axis_width", 0.006))
+        self.cleared_target_pose_z = float(rospy.get_param("~cleared_target_pose_z", -10.0))
+        self.plan_velocity_scaling = float(rospy.get_param("~plan_velocity_scaling", 1.0))
+        self.plan_acceleration_scaling = float(rospy.get_param("~plan_acceleration_scaling", 1.0))
         self.bin_position_only = rospy.get_param("~bin_position_only", False)
         self.use_object_score_target = rospy.get_param("~use_object_score_target", True)
         self.object_score_topic = rospy.get_param("~object_score_topic", "/perception/object_score")
@@ -166,6 +195,19 @@ class PRMPlannerNode:
         )
         self.execute_max_velocity = float(rospy.get_param("~execute_max_velocity", 1.0))
         self.execute_max_acceleration = float(rospy.get_param("~execute_max_acceleration", 1.0))
+        self.action_planning_time = float(
+            rospy.get_param("~action_planning_time", min(self.planning_time, 10.0))
+        )
+        self.action_attempts = int(rospy.get_param("~action_attempts", 1))
+        self.action_use_fallback_planners = bool(
+            rospy.get_param("~action_use_fallback_planners", False)
+        )
+        self.action_clear_octomap_before_plan = bool(
+            rospy.get_param("~action_clear_octomap_before_plan", False)
+        )
+        self.action_clear_octomap_on_failure = bool(
+            rospy.get_param("~action_clear_octomap_on_failure", False)
+        )
         self.latest_objects = {}
         self.selected_object = None
 
@@ -185,15 +227,21 @@ class PRMPlannerNode:
         self.target_pose_pub = rospy.Publisher("~target_pose", PoseStamped, queue_size=1, latch=True)
         self.target_axis_pub = rospy.Publisher("~target_pose_axis", Marker, queue_size=1, latch=True)
         self.status_marker_pub = rospy.Publisher("~status_marker", Marker, queue_size=1, latch=True)
+        self.target_pose_preview_sub = rospy.Subscriber(
+            "/path_planning/target_pose_preview",
+            PoseStamped,
+            self._target_pose_preview_cb,
+            queue_size=1,
+        )
         self.target_tf_broadcaster = tf2_ros.TransformBroadcaster() if self.publish_target_tf else None
         self.target_tf_timer = None
         self.motion_control_client = actionlib.SimpleActionClient(
             "/motion_control/execute_trajectory",
-            ExecuteTrajectoryAction,
+            _ExecuteTrajectoryActionSpec,
         )
         self.plan_execute_pose_server = actionlib.SimpleActionServer(
             "/path_planning/plan_execute_pose",
-            PlanExecutePoseAction,
+            _PlanExecutePoseActionSpec,
             execute_cb=self._execute_pose_action_cb,
             auto_start=False,
         )
@@ -205,6 +253,8 @@ class PRMPlannerNode:
         self.group.set_goal_position_tolerance(self.goal_position_tolerance)
         self.group.set_goal_orientation_tolerance(self.goal_orientation_tolerance)
         self.group.set_goal_joint_tolerance(self.goal_joint_tolerance)
+        self.group.set_max_velocity_scaling_factor(max(0.01, min(1.0, self.plan_velocity_scaling)))
+        self.group.set_max_acceleration_scaling_factor(max(0.01, min(1.0, self.plan_acceleration_scaling)))
         self.group.allow_replanning(True)
         self.group.set_start_state_to_current_state()
 
@@ -226,14 +276,30 @@ class PRMPlannerNode:
             str(self.bin_position_only),
         )
         rospy.loginfo(
+            "[PRM] MoveIt scaling: plan_velocity=%.2f plan_acceleration=%.2f execute_velocity=%.2f execute_acceleration=%.2f",
+            self.plan_velocity_scaling,
+            self.plan_acceleration_scaling,
+            self.execute_max_velocity,
+            self.execute_max_acceleration,
+        )
+        rospy.loginfo(
+            "[PRM] Action planning policy: time=%.2f attempts=%d use_fallback_planners=%s clear_octomap_before_plan=%s clear_octomap_on_failure=%s",
+            self.action_planning_time,
+            self.action_attempts,
+            str(self.action_use_fallback_planners),
+            str(self.action_clear_octomap_before_plan),
+            str(self.action_clear_octomap_on_failure),
+        )
+        rospy.loginfo(
             "[PRM] Octomap clearing: before_plan=%s on_failure=%s",
             str(self.clear_octomap_before_plan),
             str(self.clear_octomap_on_failure),
         )
         rospy.loginfo(
-            "[PRM] Visualization: publish_markers=%s save_plot=%s plot_path=%s",
+            "[PRM] Visualization: publish_markers=%s save_plot=%s compute_ee_path_points=%s plot_path=%s",
             str(self.publish_plan_markers),
             str(self.save_plan_plot),
+            str(self.compute_ee_path_points),
             self.plan_plot_path,
         )
         rospy.loginfo(
@@ -268,6 +334,7 @@ class PRMPlannerNode:
         rospy.Service("~plan_pregrasp", Trigger, self._srv_plan_pregrasp)
         rospy.Service("~plan_grasp", Trigger, self._srv_plan_grasp)
         rospy.Service("~plan_to_bin", Trigger, self._srv_plan_to_bin)
+        rospy.Service("/path_planning/clear_target_pose", Trigger, self._srv_clear_target_pose)
 
         if self.allow_gripper_internal_collisions:
             self._allow_gripper_internal_collisions()
@@ -278,6 +345,7 @@ class PRMPlannerNode:
                 self._target_tf_timer_cb,
             )
 
+        self._clear_target_visuals(log_message=False)
         self.plan_execute_pose_server.start()
         rospy.loginfo("[PRM] PRM planner node ready.")
 
@@ -308,6 +376,34 @@ class PRMPlannerNode:
             return False, "target_pose orientation is invalid (zero quaternion)"
         return True, ""
 
+    def _set_group_planning_config(self, planning_time, attempts):
+        self.group.set_planning_time(float(planning_time))
+        self.group.set_num_planning_attempts(int(attempts))
+
+    def _plan_action_target(self, goal):
+        saved_clear_before = self.clear_octomap_before_plan
+        saved_clear_on_failure = self.clear_octomap_on_failure
+        saved_fallback_planners = list(self.fallback_planners)
+
+        self.clear_octomap_before_plan = self.action_clear_octomap_before_plan
+        self.clear_octomap_on_failure = self.action_clear_octomap_on_failure
+        if not self.action_use_fallback_planners:
+            self.fallback_planners = []
+        self._set_group_planning_config(self.action_planning_time, self.action_attempts)
+
+        try:
+            return self.plan_to_pose(
+                goal.target_pose,
+                label="action_target",
+                position_only=goal.position_only,
+                execute_motion=False,
+            )
+        finally:
+            self.clear_octomap_before_plan = saved_clear_before
+            self.clear_octomap_on_failure = saved_clear_on_failure
+            self.fallback_planners = saved_fallback_planners
+            self._set_group_planning_config(self.planning_time, self.planning_attempts)
+
     def _execute_pose_action_cb(self, goal):
         is_valid, message = self._validate_plan_execute_goal(goal)
         if not is_valid:
@@ -332,12 +428,14 @@ class PRMPlannerNode:
             PlanExecutePoseFeedback.PLANNING,
             "Planning with MoveIt/PRM",
         )
-        success, robot_traj = self.plan_to_pose(
-            goal.target_pose,
-            label="action_target",
-            position_only=goal.position_only,
-            execute_motion=False,
+        rospy.loginfo(
+            "[PRM] Action target planning budget: time=%.2fs attempts=%d fallback_planners=%s octomap_retry=%s",
+            self.action_planning_time,
+            self.action_attempts,
+            str(self.action_use_fallback_planners),
+            str(self.action_clear_octomap_on_failure),
         )
+        success, robot_traj = self._plan_action_target(goal)
 
         if self.plan_execute_pose_server.is_preempt_requested():
             result = self._make_plan_execute_result(
@@ -373,12 +471,28 @@ class PRMPlannerNode:
         execute_goal.trajectory = robot_traj.joint_trajectory
         execute_goal.max_velocity = self.execute_max_velocity
         execute_goal.max_acceleration = self.execute_max_acceleration
+        traj_points = len(robot_traj.joint_trajectory.points)
+        traj_duration = (
+            robot_traj.joint_trajectory.points[-1].time_from_start.to_sec()
+            if traj_points > 0
+            else 0.0
+        )
 
         self._publish_plan_execute_feedback(
             PlanExecutePoseFeedback.EXECUTING,
             "Executing trajectory via motion_control",
         )
+        rospy.loginfo(
+            "[PRM] Sending trajectory to motion_control: points=%d duration=%.2fs vel_scale=%.2f acc_scale=%.2f",
+            traj_points,
+            traj_duration,
+            self.execute_max_velocity,
+            self.execute_max_acceleration,
+        )
         self.motion_control_client.send_goal(execute_goal)
+        rospy.loginfo("[PRM] motion_control goal sent, waiting for execution result...")
+        execute_wait_start = rospy.Time.now()
+        last_wait_log = execute_wait_start
 
         while not rospy.is_shutdown():
             if self.plan_execute_pose_server.is_preempt_requested():
@@ -392,9 +506,24 @@ class PRMPlannerNode:
                 self.plan_execute_pose_server.set_preempted(result, result.message)
                 return
 
+            now = rospy.Time.now()
+            if (now - last_wait_log).to_sec() >= 2.0:
+                rospy.loginfo(
+                    "[PRM] Waiting for motion_control execution result... elapsed=%.1fs",
+                    (now - execute_wait_start).to_sec(),
+                )
+                last_wait_log = now
+
             if self.motion_control_client.wait_for_result(timeout=rospy.Duration(0.1)):
                 motion_result = self.motion_control_client.get_result()
                 motion_state = self.motion_control_client.get_state()
+                rospy.loginfo(
+                    "[PRM] motion_control execution finished: state=%d success=%s status=%s message=%s",
+                    motion_state,
+                    str(motion_result.success if motion_result is not None else False),
+                    str(motion_result.status if motion_result is not None else "None"),
+                    motion_result.message if motion_result is not None else "no result",
+                )
 
                 if motion_state == action_msgs.GoalStatus.SUCCEEDED and motion_result is not None and motion_result.success:
                     result = self._make_plan_execute_result(
@@ -525,6 +654,122 @@ class PRMPlannerNode:
             return True
         except Exception:
             return False
+
+    def _make_hidden_target_pose(self):
+        pose = PoseStamped()
+        pose.header.frame_id = self.frame_id
+        pose.header.stamp = rospy.Time.now()
+        pose.pose.position.x = 0.0
+        pose.pose.position.y = 0.0
+        pose.pose.position.z = self.cleared_target_pose_z
+        pose.pose.orientation.w = 1.0
+        return pose
+
+    def _publish_delete_marker(self, publisher, namespace, marker_id):
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.action = Marker.DELETE
+        publisher.publish(marker)
+
+    def _clear_target_visuals(self, log_message=True):
+        hidden_pose = self._make_hidden_target_pose()
+        with self._target_tf_lock:
+            self._latest_target_pose = copy.deepcopy(hidden_pose)
+
+        self.target_pose_pub.publish(hidden_pose)
+        self._broadcast_target_tf()
+        self._publish_delete_marker(self.target_marker_pub, "prm_target", 1)
+        self._publish_delete_marker(self.path_marker_pub, "prm_ee_path", 2)
+        self._publish_delete_marker(self.status_marker_pub, "prm_status", 3)
+        self._publish_delete_marker(self.target_axis_pub, "prm_target_pose_axis", 4)
+
+        if log_message:
+            rospy.loginfo(
+                "[PRM] Cleared target pose visualization and moved %s below view (z=%.3f).",
+                self.target_tf_frame,
+                self.cleared_target_pose_z,
+            )
+
+    def _srv_clear_target_pose(self, _req):
+        self._clear_target_visuals(log_message=True)
+        return TriggerResponse(success=True, message="target_pose_cleared")
+
+    def _publish_target_preview(self, target_pose):
+        self.target_pose_pub.publish(target_pose)
+        self._update_target_tf(target_pose)
+
+        if not self.publish_plan_markers:
+            return
+
+        now = rospy.Time.now()
+
+        target_marker = Marker()
+        target_marker.header.frame_id = self.frame_id
+        target_marker.header.stamp = now
+        target_marker.ns = "prm_target"
+        target_marker.id = 1
+        target_marker.type = Marker.SPHERE
+        target_marker.action = Marker.ADD
+        target_marker.pose = target_pose.pose
+        target_marker.scale.x = 0.035
+        target_marker.scale.y = 0.035
+        target_marker.scale.z = 0.035
+        target_marker.color.a = 1.0
+        target_marker.color.r = 1.0
+        target_marker.color.g = 0.8
+        target_marker.color.b = 0.1
+        self.target_marker_pub.publish(target_marker)
+
+        axis_marker = Marker()
+        axis_marker.header.frame_id = self.frame_id
+        axis_marker.header.stamp = now
+        axis_marker.ns = "prm_target_pose_axis"
+        axis_marker.id = 4
+        axis_marker.type = Marker.LINE_LIST
+        axis_marker.action = Marker.ADD
+        axis_marker.pose.orientation.w = 1.0
+        axis_marker.scale.x = self.target_axis_width
+        axis_marker.points = []
+        axis_marker.colors = []
+
+        origin = target_pose.pose.position
+        quat = target_pose.pose.orientation
+        axis_specs = [
+            ((self.target_axis_length, 0.0, 0.0), ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)),
+            ((0.0, self.target_axis_length, 0.0), ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)),
+            ((0.0, 0.0, self.target_axis_length), ColorRGBA(r=0.0, g=0.4, b=1.0, a=1.0)),
+        ]
+        for axis_vec, color in axis_specs:
+            dx, dy, dz = rotate_vector_by_quaternion(quat, axis_vec)
+            start = Point()
+            start.x = origin.x
+            start.y = origin.y
+            start.z = origin.z
+            end = Point()
+            end.x = origin.x + dx
+            end.y = origin.y + dy
+            end.z = origin.z + dz
+            axis_marker.points.extend([start, end])
+            axis_marker.colors.extend([color, color])
+        self.target_axis_pub.publish(axis_marker)
+
+        self._publish_delete_marker(self.path_marker_pub, "prm_ee_path", 2)
+        self._publish_delete_marker(self.status_marker_pub, "prm_status", 3)
+
+    def _target_pose_preview_cb(self, msg):
+        if not msg.header.frame_id:
+            return
+        self._publish_target_preview(msg)
+        rospy.loginfo(
+            "[PRM] Preview target pose updated: frame=%s pos=(%.3f, %.3f, %.3f)",
+            msg.header.frame_id,
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+        )
 
     def _update_target_tf(self, target_pose):
         if not self.publish_target_tf:
@@ -1069,7 +1314,7 @@ class PRMPlannerNode:
 
         publish_display_trajectory(self.robot, robot_traj)
         rospy.loginfo("[PRM] Published planned trajectory to /move_group/display_planned_path")
-        ee_points = self._ee_points_from_traj(robot_traj)
+        ee_points = self._ee_points_from_traj(robot_traj) if self.compute_ee_path_points else []
         self._publish_plan_markers(ee_points, pose_stamped, True, label, "planned")
         self._save_plan_plot(ee_points, pose_stamped, True, label, "planned")
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-UR5e Teach Pendant UI - 软示教器界面
-纯 UI 脚本，不包含运动控制逻辑
-所有运动控制函数由同事在 motion_control_node.py 中实现
+UR5e Teach Pendant UI - Soft Teach Pendant
+UI-only script, motion control is in motion_control_node.py
 
 Author: Suhang Xia
 Usage:
@@ -15,7 +15,7 @@ import rospy
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QDoubleSpinBox, QGroupBox, QGridLayout,
-    QTextEdit
+    QTextEdit, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -23,7 +23,8 @@ from PyQt5.QtGui import QFont
 # ROS Messages
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
+from std_srvs.srv import Trigger
 from common_msgs.msg import MotionCommand, GraspResult
 import tf2_ros
 import tf2_geometry_msgs
@@ -32,15 +33,15 @@ import tf.transformations as tf_trans
 
 class UR5eTeachPendantUI(QMainWindow):
     """
-    UR5e 软示教器界面类
-    注意：此类仅负责 UI 显示和按钮事件响应
-    所有实际的运动控制功能需要调用 motion_control_node.py 中的接口
+    UR5e Soft Teach Pendant UI.
+    This class only handles UI display and button events.
+    Motion control is implemented in motion_control_node.py.
     """
 
     pose_updated_signal = pyqtSignal(dict)
     status_updated_signal = pyqtSignal(str)
     joints_updated_signal = pyqtSignal(list)
-    traverse_advance_signal = pyqtSignal()  # 从 rospy 线程发到主线程，触发遍历阶段推进
+    traverse_advance_signal = pyqtSignal()  # rospy thread -> main thread, advance traversal phase
 
     def __init__(self):
         super().__init__()
@@ -62,9 +63,9 @@ class UR5eTeachPendantUI(QMainWindow):
         self._traverse_phase = 'move'  # 'move' | 'roll' | 'pitch' | 'yaw' | 'restore'
         self._traverse_base_quat = None  # orientation at the position point
 
-        # motion_control 连接状态：收到 /motion/result 后置 True
+        # motion_control connected: set True when /motion/result received
         self._motion_control_connected = False
-        # 灵巧工作空间边界 [x_min, x_max, y_min, y_max, z_min, z_max]，来自 /motion/workspace_bounds
+        # Dexterous workspace bounds [x_min, x_max, y_min, y_max, z_min, z_max] from /motion/workspace_bounds
         self._workspace_bounds = None
 
         self.init_ros()
@@ -83,6 +84,7 @@ class UR5eTeachPendantUI(QMainWindow):
         try:
             rospy.init_node('ur5e_teach_pendant_ui', anonymous=True)
             self.motion_cmd_pub = rospy.Publisher('/motion/command', MotionCommand, queue_size=10)
+            self.gripper_cmd_pub = rospy.Publisher('/gripper/command', String, queue_size=1)
             self.joint_state_sub = rospy.Subscriber('/joint_states', JointState, self.on_joint_state_received)
             self.motion_result_sub = rospy.Subscriber('/motion/result', GraspResult, self.on_motion_result_received)
             self.workspace_bounds_sub = rospy.Subscriber(
@@ -141,6 +143,44 @@ class UR5eTeachPendantUI(QMainWindow):
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             rospy.logdebug("[TeachPendantUI] TF lookup failed: %s" % str(e))
             return None, None
+
+    @staticmethod
+    def _extract_arm_joints_from_joint_state(msg):
+        joint_names = [
+            'shoulder_pan_joint',
+            'shoulder_lift_joint',
+            'elbow_joint',
+            'wrist_1_joint',
+            'wrist_2_joint',
+            'wrist_3_joint',
+        ]
+        joints = []
+        for name in joint_names:
+            if name not in msg.name:
+                return None
+            joints.append(float(msg.position[msg.name.index(name)]))
+        return joints
+
+    def _get_current_joints_from_topic(self, timeout_sec=0.5, prefer_cached=True):
+        if prefer_cached and self.current_joints and len(self.current_joints) == 6:
+            return list(self.current_joints)
+        try:
+            msg = rospy.wait_for_message('/joint_states', JointState, timeout=timeout_sec)
+        except rospy.ROSException:
+            return None
+        return self._extract_arm_joints_from_joint_state(msg)
+
+    def _apply_joint_values_to_ui(self, joints, force=False):
+        if joints is None:
+            return
+        self.current_joints = list(joints)
+        if self._joint_edit_mode and not force:
+            return
+        for i, angle in enumerate(joints):
+            if i < len(self.joint_spinboxes):
+                self.joint_spinboxes[i].blockSignals(True)
+                self.joint_spinboxes[i].setValue(angle)
+                self.joint_spinboxes[i].blockSignals(False)
 
     def _send_move_to_pose(self, target_pose_stamped):
         """Publish MotionCommand MOVE_TO_POSE."""
@@ -310,7 +350,7 @@ class UR5eTeachPendantUI(QMainWindow):
         func_layout.addWidget(self.btn_record)
         left_layout.addWidget(func_group)
 
-        self.status_label = QLabel("Status: Ready | motion_control: 等待连接...")
+        self.status_label = QLabel("Status: Ready | motion_control: waiting...")
         self.status_label.setStyleSheet("padding: 5px; background-color: #f0f0f0;")
         self.status_label.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(self.status_label)
@@ -357,7 +397,7 @@ class UR5eTeachPendantUI(QMainWindow):
         self.traverse_z_spinbox.setDecimals(3)
         self.traverse_z_spinbox.setSingleStep(0.01)
         traverse_layout.addWidget(self.traverse_z_spinbox, 0, 1)
-        traverse_layout.addWidget(QLabel("目标点数:"), 1, 0)
+        traverse_layout.addWidget(QLabel("Target points:"), 1, 0)
         self.traverse_points_spinbox = QDoubleSpinBox()
         self.traverse_points_spinbox.setRange(50, 2000)
         self.traverse_points_spinbox.setValue(500)
@@ -365,7 +405,7 @@ class UR5eTeachPendantUI(QMainWindow):
         self.traverse_points_spinbox.setSingleStep(50)
         traverse_layout.addWidget(self.traverse_points_spinbox, 1, 1)
         traverse_layout.addWidget(QLabel("Workspace:"), 2, 0)
-        self.traverse_workspace_label = QLabel("等待 motion_control...")
+        self.traverse_workspace_label = QLabel("Waiting for motion_control...")
         self.traverse_workspace_label.setStyleSheet("color: #666; font-size: 10px;")
         traverse_layout.addWidget(self.traverse_workspace_label, 2, 1)
         traverse_layout.addWidget(QLabel("Move time (s):"), 3, 0)
@@ -375,6 +415,10 @@ class UR5eTeachPendantUI(QMainWindow):
         self.traverse_time_spinbox.setDecimals(1)
         self.traverse_time_spinbox.setSingleStep(0.5)
         traverse_layout.addWidget(self.traverse_time_spinbox, 3, 1)
+        self.traverse_fixed_down_check = QCheckBox("Fixed downward pose (camera faces table)")
+        self.traverse_fixed_down_check.setChecked(True)
+        self.traverse_fixed_down_check.setToolTip("Checked: fixed downward pose; Unchecked: use current pose")
+        traverse_layout.addWidget(self.traverse_fixed_down_check, 4, 0, 1, 2)
         traverse_btn_row = QHBoxLayout()
         self.btn_traverse_start = QPushButton("Start")
         self.btn_traverse_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 6px;")
@@ -385,11 +429,11 @@ class UR5eTeachPendantUI(QMainWindow):
         self.btn_traverse_stop.clicked.connect(self._stop_traversal)
         self.btn_traverse_stop.setEnabled(False)
         traverse_btn_row.addWidget(self.btn_traverse_stop)
-        traverse_layout.addLayout(traverse_btn_row, 4, 0, 1, 2)
+        traverse_layout.addLayout(traverse_btn_row, 5, 0, 1, 2)
         self.traverse_status_label = QLabel("Idle")
         self.traverse_status_label.setAlignment(Qt.AlignCenter)
         self.traverse_status_label.setStyleSheet("font-family: monospace; color: #666;")
-        traverse_layout.addWidget(self.traverse_status_label, 5, 0, 1, 2)
+        traverse_layout.addWidget(self.traverse_status_label, 6, 0, 1, 2)
         right_layout.addWidget(traverse_group)
 
         log_group = QGroupBox("Log")
@@ -399,6 +443,19 @@ class UR5eTeachPendantUI(QMainWindow):
         log_group_layout = QVBoxLayout(log_group)
         log_group_layout.addWidget(self.log_text)
         right_layout.addWidget(log_group)
+
+        gripper_group = QGroupBox("Gripper Control")
+        gripper_layout = QHBoxLayout(gripper_group)
+        self.btn_grasp = QPushButton("Grasp")
+        self.btn_grasp.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 6px;")
+        self.btn_grasp.clicked.connect(self.on_grasp_clicked)
+        self.btn_release = QPushButton("Release")
+        self.btn_release.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 6px;")
+        self.btn_release.clicked.connect(self.on_release_clicked)
+        gripper_layout.addWidget(self.btn_grasp)
+        gripper_layout.addWidget(self.btn_release)
+        right_layout.addWidget(gripper_group)
+
         points_group = QGroupBox("Recorded Points")
         points_layout = QVBoxLayout(points_group)
         self.recorded_points = QTextEdit()
@@ -503,6 +560,29 @@ class UR5eTeachPendantUI(QMainWindow):
         self.recorded_points_list.clear()
         self._update_recorded_points_display()
         self.log("Clear points")
+
+    def on_grasp_clicked(self):
+        """Call /gripper/grasp service."""
+        try:
+            grasp_srv = rospy.ServiceProxy('/gripper/grasp', Trigger)
+            resp = grasp_srv()
+            if resp.success:
+                self.log("Gripper: Grasp success")
+            else:
+                self.log("Gripper: Grasp empty (no object)")
+        except rospy.ServiceException as e:
+            self.log("Gripper: Grasp failed - %s" % str(e))
+        except Exception as e:
+            self.log("Gripper: Grasp error - %s" % str(e))
+
+    def on_release_clicked(self):
+        """Publish release to /gripper/command."""
+        try:
+            msg = String(data="release")
+            self.gripper_cmd_pub.publish(msg)
+            self.log("Gripper: Release sent")
+        except Exception as e:
+            self.log("Gripper: Release error - %s" % str(e))
     def _update_recorded_points_display(self):
         lines = []
         for rec in self.recorded_points_list:
@@ -514,17 +594,25 @@ class UR5eTeachPendantUI(QMainWindow):
         if pose_dict is None:
             self.log("Refresh pose: TF failed (base_link->tool0)")
             return
+
+        joints = self._get_current_joints_from_topic(timeout_sec=0.5, prefer_cached=False)
         self.current_pose = pose_dict
         self.current_pose_stamped = pose_stamped
         self.pose_updated_signal.emit(pose_dict)
-        self.log("Refresh pose OK")
+        if joints is not None:
+            self._apply_joint_values_to_ui(joints, force=True)
+            self.log(
+                "Refresh joints: [%s]"
+                % ", ".join(f"{joint:.4f}" for joint in joints)
+            )
+            self.log("Refresh pose + joints OK")
+        else:
+            self.log("Refresh pose OK (joint states unavailable)")
 
     def on_joint_state_received(self, msg):
-        joints = []
-        for name in ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']:
-            if name in msg.name:
-                joints.append(msg.position[msg.name.index(name)])
-        if len(joints) == 6:
+        joints = self._extract_arm_joints_from_joint_state(msg)
+        if joints is not None:
+            self.current_joints = joints
             self.joints_updated_signal.emit(joints)
 
     def _on_workspace_bounds_received(self, msg):
@@ -548,13 +636,13 @@ class UR5eTeachPendantUI(QMainWindow):
         if msg.status == GraspResult.SUCCESS:
             txt = "Status: Motion OK"
             if was_first:
-                txt += " | motion_control 已连接"
+                txt += " | motion_control connected"
             self.status_updated_signal.emit(txt)
             self.log("OK %s" % msg.message)
         else:
             txt = "Status: Motion Failed"
             if was_first:
-                txt += " | motion_control 已连接"
+                txt += " | motion_control connected"
             self.status_updated_signal.emit(txt)
             self.log("Failed %s" % msg.message)
         self.is_moving = False
@@ -562,7 +650,7 @@ class UR5eTeachPendantUI(QMainWindow):
             self.traverse_advance_signal.emit()
 
     def _on_traverse_advance_requested(self):
-        """主线程槽：延迟 500ms 后推进遍历阶段（QTimer 需在主线程）"""
+        """Main thread slot: advance traversal phase after 500ms (QTimer must run in main thread)"""
         if self._traversing:
             QTimer.singleShot(500, self._advance_traverse_phase)
 
@@ -613,14 +701,7 @@ class UR5eTeachPendantUI(QMainWindow):
             self._toggle_joint_edit_mode()
 
     def on_joints_updated(self, joints):
-        self.current_joints = joints
-        if self._joint_edit_mode:
-            return
-        for i, angle in enumerate(joints):
-            if i < len(self.joint_spinboxes):
-                self.joint_spinboxes[i].blockSignals(True)
-                self.joint_spinboxes[i].setValue(angle)
-                self.joint_spinboxes[i].blockSignals(False)
+        self._apply_joint_values_to_ui(joints, force=False)
 
     # =========================================================================
     # Dexterous Space Traversal
@@ -636,39 +717,48 @@ class UR5eTeachPendantUI(QMainWindow):
 
     _ANGLE_DELTA = 0.5236  # ~30 degrees in radians
 
+    # Fixed downward pose: gripper/camera faces table (base_link -Z)
+    # [0,1,0,0] = 180 deg around Y, flips +Z to -Z (camera down)
+    _TRAVERSE_FIXED_DOWN_QUAT = [0.0, 1.0, 0.0, 0.0]
+
     def _start_traversal(self):
         """Generate XY grid waypoints in the dexterous workspace at fixed Z and start."""
         import math
         z = self.traverse_z_spinbox.value()
         target_points = int(self.traverse_points_spinbox.value())
 
-        pose_stamped, _ = self._get_current_pose_from_tf()
-        if pose_stamped is None:
-            self.log("Traversal: cannot get current pose from TF")
-            return
-        o = pose_stamped.pose.orientation
-        self._traverse_base_quat = [o.x, o.y, o.z, o.w]
+        use_fixed_down = self.traverse_fixed_down_check.isChecked()
+        if use_fixed_down:
+            self._traverse_base_quat = list(self._TRAVERSE_FIXED_DOWN_QUAT)
+            self.log("Traversal: using fixed downward pose (camera faces table)")
+        else:
+            pose_stamped, _ = self._get_current_pose_from_tf()
+            if pose_stamped is None:
+                self.log("Traversal: cannot get current pose from TF")
+                return
+            o = pose_stamped.pose.orientation
+            self._traverse_base_quat = [o.x, o.y, o.z, o.w]
 
-        # 使用灵巧工作空间边界，若无则使用 UR5e 默认范围
+        # Use dexterous workspace bounds, or UR5e default if not available
         bounds = self._workspace_bounds
         if bounds is None:
-            # UR5e 近似可达工作空间 (base_link)
+            # UR5e approximate reachable workspace (base_link)
             bounds = (0.10, 0.85, -0.55, 0.55, 0.05, 0.90)
-            self.log("Traversal: 使用默认工作空间 (motion_control 未发布边界)")
+            self.log("Traversal: using default workspace (motion_control not publishing bounds)")
         x_min, x_max, y_min, y_max, z_min, z_max = bounds
         z_fixed = max(z_min, min(z_max, z))
 
-        # 根据目标点数计算 xy_step
+        # Compute xy_step from target point count
         x_range = x_max - x_min
         y_range = y_max - y_min
         if x_range <= 0 or y_range <= 0:
-            self.log("Traversal: 工作空间无效")
+            self.log("Traversal: invalid workspace")
             return
         area = x_range * y_range
         xy_step = math.sqrt(area / max(1, target_points))
         xy_step = max(0.01, min(0.2, xy_step))
 
-        # XY 平面网格遍历
+        # XY grid traversal
         self._traverse_waypoints = []
         x_vals = []
         y_vals = []
@@ -684,14 +774,14 @@ class UR5eTeachPendantUI(QMainWindow):
             y += xy_step
         if y_max > y_min and (not y_vals or y_vals[-1] < y_max - 1e-6):
             y_vals.append(y_max)
-        # 蛇形遍历，减少空行程
+        # Snake pattern to reduce empty travel
         for i, xi in enumerate(x_vals):
             yi_list = y_vals if i % 2 == 0 else list(reversed(y_vals))
             for yi in yi_list:
                 self._traverse_waypoints.append((xi, yi, z_fixed))
         n_points = len(self._traverse_waypoints)
         if n_points == 0:
-            self.log("Traversal: 工作空间内无有效栅格点，请调整 Z 或 XY step")
+            self.log("Traversal: no valid grid points in workspace, adjust Z or target points")
             return
 
         self._traverse_index = 0
@@ -701,7 +791,7 @@ class UR5eTeachPendantUI(QMainWindow):
         self.btn_traverse_stop.setEnabled(True)
         self.log(f"Traversal started: {n_points} XY points, z={z_fixed:.3f}m, step={xy_step:.3f}m (target={target_points})")
         if not self._motion_control_connected:
-            self.log("提示：若机械臂不动，请确认 1) arm_gazebo 已启动 2) motion_control_node 已运行")
+            self.log("Tip: if arm does not move, ensure 1) arm_gazebo is running 2) motion_control_node is running")
         self._execute_traverse_step()
 
     def _stop_traversal(self):

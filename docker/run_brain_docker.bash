@@ -38,6 +38,25 @@ done
 DOCKER_COMPOSE="docker compose"
 command -v docker-compose &>/dev/null && DOCKER_COMPOSE="docker-compose"
 
+compose_ps_q() {
+  if [ "$DOCKER_COMPOSE" = "docker-compose" ]; then
+    docker-compose ps -q "$SERVICE_NAME"
+  else
+    docker compose ps -q "$SERVICE_NAME"
+  fi
+}
+
+resolve_container() {
+  local cid
+  cid="$(compose_ps_q | head -n 1)"
+  if [ -n "$cid" ]; then
+    echo "$cid"
+    return 0
+  fi
+
+  docker ps -a -q -f "label=com.docker.compose.service=${SERVICE_NAME}" | head -n 1
+}
+
 # 加载仓库内的 ROS 网络配置，避免默认回落到 localhost:11311
 if [ -f "$ENV_FILE" ]; then
   set -a
@@ -79,7 +98,9 @@ fi
 cd "$REPO_ROOT"
 
 is_running() {
-  docker ps -q -f "name=^${CONTAINER_NAME}$" | grep -q .
+  local cid
+  cid="$(resolve_container)"
+  [ -n "$cid" ] && docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true
 }
 
 compose_up() {
@@ -109,7 +130,13 @@ if [ "$BUILD_IMAGE" -eq 1 ] || [ "$FORCE_RECREATE" -eq 1 ] || ! is_running; then
   fi
 fi
 sleep 1
-docker exec -it "$CONTAINER_NAME" bash -c '
+TARGET_CONTAINER="$(resolve_container)"
+if [ -z "$TARGET_CONTAINER" ]; then
+  echo "[run_brain] Unable to resolve a container for service ${SERVICE_NAME}" >&2
+  exit 1
+fi
+
+docker exec -it "$TARGET_CONTAINER" bash -c '
   source /opt/ros/noetic/setup.bash 2>/dev/null || true
   [ -f /workspace/devel/setup.bash ] && source /workspace/devel/setup.bash
   export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
