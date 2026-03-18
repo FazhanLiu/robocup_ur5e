@@ -14,6 +14,8 @@
   ~pointcloud_topic: 原始点云话题，默认 /camera/depth/points
   ~seg_cloud_topic: 带 label 的分割点云，默认 /perception/yolo26_seg_cloud
   ~frame_id: 规划坐标系，默认 base_link
+  ~goal_pose_4x4: 可选。若传入 4x4 齐次变换（base 系下目标末端位姿），则使用 plan_one_shot_from_goal_pose，
+                  忽略 virtual_grasp_point/goal_joints；默认不设则仍用 virtual_grasp_point + IK。
   其余与 demo_one_shot_planning 一致（~goal_joints_default, ~virtual_grasp_point 等）
 
 运行前请确保：
@@ -35,7 +37,7 @@ if _SCRIPT_DIR not in sys.path:
 
 import rospy
 from sensor_msgs.msg import PointCloud2, JointState
-from geometry_msgs.msg import Point as PointMsg
+from geometry_msgs.msg import Point as PointMsg, TransformStamped
 from common_msgs.msg import MotionCommand
 import tf2_ros
 import tf2_geometry_msgs
@@ -43,6 +45,7 @@ import sensor_msgs.point_cloud2 as pc2
 
 from one_shot_planner import (
     plan_one_shot,
+    plan_one_shot_from_goal_pose,
     get_default_virtual_grasp_point,
     build_motion_command_execute_trajectory,
     plot_planning_result_3d,
@@ -51,8 +54,34 @@ from one_shot_planner import (
 from aco_rrtstar_planner_node import (
     pointcloud_to_obstacles,
     GAZEBO_DEFAULT_OBSTACLES,
+    KinematicsClient,
 )
 from pointcloud_target_removal import remove_target_region_from_pointcloud
+
+
+def _clear_all_plan_markers(frame_id="base_link"):
+    """启动时清除本 demo 使用的所有 Marker（ee_path、status），以及历史上用 target_marker 发布过的目标点球残留。目标位姿已改为仅用 TF 显示，不再发布目标点。"""
+    try:
+        from visualization_msgs.msg import Marker
+        now = rospy.Time.now()
+        pubs = [
+            ("~ee_path_marker", "one_shot_ee_path", 2),
+            ("~target_marker", "one_shot_target", 1),  # 仅 DELETE 旧球体残留，目标现用 TF one_shot_target_pose
+            ("~status_marker", "one_shot_status", 3),
+        ]
+        for topic, ns, mid in pubs:
+            pub = rospy.Publisher(topic, Marker, queue_size=1, latch=True)
+            m = Marker()
+            m.header.stamp = now
+            m.header.frame_id = frame_id
+            m.ns = ns
+            m.id = mid
+            m.action = Marker.DELETE
+            pub.publish(m)
+        rospy.sleep(0.15)
+        rospy.loginfo("[DemoTargetRemoval] Cleared previous plan markers (ee_path, target_marker残留, status)")
+    except Exception as e:
+        rospy.logdebug("[DemoTargetRemoval] Clear markers: %s", e)
 
 
 def _transform_pointcloud_to_frame(cloud_msg, target_frame, tf_buffer, timeout=0.5):
@@ -166,6 +195,24 @@ def _parse_goal_joints(param_val):
     return None
 
 
+def _parse_goal_pose_4x4(param_val):
+    """解析 ~goal_pose_4x4：4x4 齐次变换。支持 [[row0],[row1],[row2],[row3]] 或 16 个数行优先。未设置或空字符串返回 None。"""
+    if param_val is None or (isinstance(param_val, str) and param_val.strip() == ""):
+        return None
+    import ast
+    try:
+        if isinstance(param_val, str):
+            param_val = ast.literal_eval(param_val)
+        if isinstance(param_val, (list, tuple)):
+            if len(param_val) == 4 and all(isinstance(r, (list, tuple)) and len(r) == 4 for r in param_val):
+                return [[float(param_val[i][j]) for j in range(4)] for i in range(4)]
+            if len(param_val) == 16:
+                return [[float(param_val[i * 4 + j]) for j in range(4)] for i in range(4)]
+    except Exception:
+        pass
+    return None
+
+
 def _get_current_pose_from_tf(tf_buffer, tcp_link="gripper_tip_link", timeout=0.5):
     try:
         trans = tf_buffer.lookup_transform(
@@ -255,6 +302,7 @@ def main():
     rospy.sleep(0.5)
 
     frame_id = rospy.get_param("~frame_id", "base_link")
+    _clear_all_plan_markers(frame_id)
     target_class_id = int(rospy.get_param("~target_class_id", 0))
     pointcloud_topic = rospy.get_param("~pointcloud_topic", "/camera/depth/points")
     seg_cloud_topic = rospy.get_param("~seg_cloud_topic", "/perception/yolo26_seg_cloud")
@@ -262,9 +310,9 @@ def main():
     removal_padding = float(rospy.get_param("~removal_padding", 0.02))
     voxel_res = float(rospy.get_param("~voxel_resolution", 0.05))
     bounds = (
-        rospy.get_param("~workspace_x", [-0.5, 1.0]),
-        rospy.get_param("~workspace_y", [-0.5, 0.5]),
-        rospy.get_param("~workspace_z", [0.0, 0.8]),
+        tuple(_parse_float_list(rospy.get_param("~workspace_x", None), [-0.5, 1.0], min_len=2)),
+        tuple(_parse_float_list(rospy.get_param("~workspace_y", None), [-0.5, 0.5], min_len=2)),
+        tuple(_parse_float_list(rospy.get_param("~workspace_z", None), [0.0, 0.8], min_len=2)),
     )
 
     rospy.loginfo("[DemoTargetRemoval] target_class_id=%s, removal_padding=%.3f, frame=%s",
@@ -273,26 +321,45 @@ def main():
     # 起点
     start_xyz, _ = _get_current_pose_from_tf(tf_buffer)
     if start_xyz is None:
-        start_xyz = rospy.get_param("~start_xyz", [0.2, 0.0, 0.5])
+        start_xyz = _parse_float_list(
+            rospy.get_param("~start_xyz", None),
+            [0.2, 0.0, 0.5],
+        )
         rospy.logwarn("[DemoTargetRemoval] Using ~start_xyz: %s", start_xyz)
-    else:
-        rospy.loginfo("[DemoTargetRemoval] Start from TF: %s", [round(x, 3) for x in start_xyz])
+    rospy.loginfo("[DemoTargetRemoval] Start from TF: %s", [round(x, 3) for x in start_xyz])
 
     start_joints = _get_start_joints_from_topic(timeout=5.0)
     if start_joints is None:
-        start_joints = rospy.get_param("~home_joints", [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0])
+        start_joints = _parse_goal_joints(rospy.get_param("~home_joints", None))
+    if start_joints is None:
+        start_joints = [0.0, -1.5708, 0.0, -1.5708, 0.0, 0.0]
     rospy.loginfo("[DemoTargetRemoval] Start joints: %s", [round(x, 3) for x in start_joints])
 
-    # 目标
-    goal_xyz = _parse_float_list(
-        rospy.get_param("~virtual_grasp_point", None),
-        get_default_virtual_grasp_point(),
-    )
-    goal_joints = _parse_goal_joints(rospy.get_param("~goal_joints", None))
-    if goal_joints is None:
-        goal_joints = rospy.get_param("~goal_joints_default", [0.0, -2.0, 1.2, -1.5708, -1.5708, 0.0])
-    rospy.loginfo("[DemoTargetRemoval] Goal xyz: %s, goal_joints: %s",
-                  [round(x, 3) for x in goal_xyz], [round(x, 3) for x in goal_joints])
+    # 目标：若传入 ~goal_pose_4x4 则使用笛卡尔矩阵模式（plan_one_shot_from_goal_pose）；否则用 virtual_grasp_point + goal_joints/IK
+    goal_pose_4x4 = _parse_goal_pose_4x4(rospy.get_param("~goal_pose_4x4", None))
+    use_goal_pose_4x4 = goal_pose_4x4 is not None
+
+    if not use_goal_pose_4x4:
+        goal_xyz = _parse_float_list(
+            rospy.get_param("~virtual_grasp_point", None),
+            get_default_virtual_grasp_point(),
+        )
+        goal_joints = _parse_goal_joints(rospy.get_param("~goal_joints", None))
+        if goal_joints is None:
+            kc = KinematicsClient(use_motion_control=True)
+            ik_joints = kc.ik(goal_xyz)
+            if ik_joints is not None:
+                goal_joints = list(ik_joints)
+                rospy.loginfo("[DemoTargetRemoval] 由 goal_xyz 经 IK 得到 goal_joints: %s", [round(x, 3) for x in goal_joints])
+            else:
+                goal_joints = _parse_goal_joints(rospy.get_param("~goal_joints_default", None))
+                if goal_joints is None:
+                    goal_joints = [0.0, -2.0, 1.2, -1.5708, -1.5708, 0.0]
+                rospy.logwarn("[DemoTargetRemoval] IK 失败，使用 goal_joints_default: %s", [round(x, 3) for x in goal_joints])
+        rospy.loginfo("[DemoTargetRemoval] Goal xyz: %s, goal_joints: %s",
+                      [round(x, 3) for x in goal_xyz], [round(x, 3) for x in goal_joints])
+    else:
+        rospy.loginfo("[DemoTargetRemoval] 使用 goal_pose_4x4 笛卡尔目标位姿")
 
     # 获取点云并挖空目标（方式 B：若提供 YOLO 实例点云与目标中心，则优先使用 new API）
     obstacles = None
@@ -339,6 +406,7 @@ def main():
                         voxel_res=voxel_res,
                         bounds=bounds,
                         include_target_obstacle=False,
+                        current_joints=start_joints,
                     )
                     if target_and_env is not None:
                         obstacles = target_and_env.get("obstacles") or []
@@ -362,6 +430,7 @@ def main():
             rospy.logerr("[DemoTargetRemoval] Cannot get point clouds, using default obstacles")
             obstacles = GAZEBO_DEFAULT_OBSTACLES
         else:
+            from aco_rrtstar_planner_node import filter_pointcloud_robot_arm
             filtered_cloud = remove_target_region_from_pointcloud(
                 raw_in_frame,
                 seg_in_frame,
@@ -369,8 +438,11 @@ def main():
                 padding=removal_padding,
                 output_frame_id=frame_id,
             )
+            cloud_no_robot = filter_pointcloud_robot_arm(
+                filtered_cloud, start_joints, frame_id=frame_id
+            )
             obstacles = pointcloud_to_obstacles(
-                filtered_cloud,
+                cloud_no_robot,
                 voxel_res=voxel_res,
                 frame_id=frame_id,
                 bounds=bounds,
@@ -381,15 +453,27 @@ def main():
             else:
                 rospy.loginfo("[DemoTargetRemoval] Obstacles after target removal: %d", len(obstacles))
 
-    # 一次性规划
-    result = plan_one_shot(
-        start_xyz=start_xyz,
-        start_joints=start_joints,
-        goal_xyz=goal_xyz,
-        goal_joints=goal_joints,
-        obstacles=obstacles,
-        return_vis_data=True,
-    )
+    # 一次性规划：若已设 goal_pose_4x4 则用 plan_one_shot_from_goal_pose，否则 plan_one_shot
+    if use_goal_pose_4x4:
+        result = plan_one_shot_from_goal_pose(
+            goal_pose_4x4=goal_pose_4x4,
+            start_xyz=start_xyz,
+            start_joints=start_joints,
+            obstacles=obstacles,
+            bounds=bounds,
+            frame_id=frame_id,
+            return_vis_data=True,
+            seed_joints_for_ik=start_joints,
+        )
+    else:
+        result = plan_one_shot(
+            start_xyz=start_xyz,
+            start_joints=start_joints,
+            goal_xyz=goal_xyz,
+            goal_joints=goal_joints,
+            obstacles=obstacles,
+            return_vis_data=True,
+        )
     if result is None or len(result) < 2:
         rospy.logerr("[DemoTargetRemoval] Planning failed")
         return
@@ -400,18 +484,45 @@ def main():
         rospy.logerr("[DemoTargetRemoval] Planning failed")
         return
 
-    # 可选：发布 Marker
+    # 目标位姿用 TF 发布（位置来自 vis_data.goal_xyz，与规划一致）
+    target_pose_frame_id = rospy.get_param("~target_pose_frame_id", "one_shot_target_pose")
+    tf_broadcaster = tf2_ros.TransformBroadcaster()
+    target_pose_xyz = list(vis_data["goal_xyz"]) if vis_data and "goal_xyz" in vis_data else [0.0, 0.0, 0.0]
+
+    def _publish_target_pose_tf(_event=None):
+        t = TransformStamped()
+        t.header.stamp = rospy.Time.now()
+        t.header.frame_id = frame_id
+        t.child_frame_id = target_pose_frame_id
+        t.transform.translation.x = float(target_pose_xyz[0])
+        t.transform.translation.y = float(target_pose_xyz[1])
+        t.transform.translation.z = float(target_pose_xyz[2])
+        t.transform.rotation.x = 0.0
+        t.transform.rotation.y = 0.0
+        t.transform.rotation.z = 0.0
+        t.transform.rotation.w = 1.0
+        tf_broadcaster.sendTransform(t)
+
+    _publish_target_pose_tf()
+    rospy.Timer(rospy.Duration(0.1), _publish_target_pose_tf)
+
+    # 可选：发布轨迹与状态 Marker；目标位姿仅用 TF 显示，不发 target 点
     try:
         from one_shot_trajectory_display import publish_plan_markers
+        from visualization_msgs.msg import Marker
         if rospy.get_param("~publish_plan_markers", True):
-            from visualization_msgs.msg import Marker
             path_marker_pub = rospy.Publisher("~ee_path_marker", Marker, queue_size=1, latch=True)
-            target_marker_pub = rospy.Publisher("~target_marker", Marker, queue_size=1, latch=True)
             status_marker_pub = rospy.Publisher("~status_marker", Marker, queue_size=1, latch=True)
             rospy.sleep(0.2)
-            publish_plan_markers(path_marker_pub, target_marker_pub, status_marker_pub,
-                                vis_data, success=True, frame_id=frame_id)
-            rospy.loginfo("[DemoTargetRemoval] Published trajectory markers")
+            publish_plan_markers(
+                path_marker_pub,
+                None,  # 目标用 TF 显示，不发布 target 点
+                status_marker_pub,
+                vis_data,
+                success=True,
+                frame_id=frame_id,
+            )
+            rospy.loginfo("[DemoTargetRemoval] Published trajectory markers and TF %s -> %s (target pose only in TF)", frame_id, target_pose_frame_id)
     except Exception as e:
         rospy.logdebug("[DemoTargetRemoval] Markers: %s", e)
 
