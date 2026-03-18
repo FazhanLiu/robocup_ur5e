@@ -7,12 +7,14 @@
   <arg name="gripper_action_name" default="/gripper_controller/follow_joint_trajectory"/>
   <arg name="gripper_joint_name" default="robotiq_85_left_knuckle_joint"/>
   <arg name="gripper_open_position" default="0.0"/>
-  <arg name="gripper_closed_position" default="0.80285"/>
+  <arg name="gripper_closed_position" default="0.72"/>
   <arg name="gripper_motion_time" default="1.0"/>
   <arg name="gripper_wait_timeout" default="3.0"/>
   <arg name="gripper_position_tolerance" default="0.03"/>
   <arg name="gripper_grasp_retry_count" default="1"/>
   <arg name="gripper_post_grasp_settle_time" default="0.2"/>
+  <arg name="gripper_skip_holding_check" default="true"/>
+  <arg name="gripper_accept_partial_grasp" default="true"/>
   <arg name="gripper_release_min_closed_error" default="0.25"/>
   <arg name="gripper_empty_grasp_closed_tolerance" default="0.05"/>
   <arg name="gripper_left_tip_link" default="robotiq_85_left_finger_tip_link"/>
@@ -34,6 +36,8 @@
     <param name="gripper_position_tolerance" value="$(arg gripper_position_tolerance)"/>
     <param name="gripper_grasp_retry_count" value="$(arg gripper_grasp_retry_count)"/>
     <param name="gripper_post_grasp_settle_time" value="$(arg gripper_post_grasp_settle_time)"/>
+    <param name="gripper_skip_holding_check" value="$(arg gripper_skip_holding_check)"/>
+    <param name="gripper_accept_partial_grasp" value="$(arg gripper_accept_partial_grasp)"/>
     <param name="gripper_release_min_closed_error" value="$(arg gripper_release_min_closed_error)"/>
     <param name="gripper_empty_grasp_closed_tolerance" value="$(arg gripper_empty_grasp_closed_tolerance)"/>
     <param name="gripper_left_tip_link" value="$(arg gripper_left_tip_link)"/>
