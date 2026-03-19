@@ -131,6 +131,7 @@ def build_obstacles_from_yolo_instance_cloud(
     class_id_field="class_id",
     center_match_radius=0.10,
     include_target_obstacle=True,
+    current_joints=None,
 ):
     """
     从 YOLO 分割实例点云构造一次性规划可用的障碍物列表。
@@ -160,6 +161,7 @@ def build_obstacles_from_yolo_instance_cloud(
         center_match_radius: 若所有实例到目标中心的最近距离都大于该值（米），视为匹配失败。
         include_target_obstacle: 若为 True，则把目标物体自身 AABB 也视作障碍物加入列表；
                                  若为 False，则仅返回环境障碍物（适合“目标是吸引点、而非障碍”的抓取场景）。
+        current_joints: 可选，长度 6 的当前关节角（弧度）；若提供，体素化前会从环境点云中排除落在机械臂 AABB 内的点。
 
     Returns:
         dict，字段包括：
@@ -255,12 +257,16 @@ def build_obstacles_from_yolo_instance_cloud(
 
     obstacles = []
 
-    # 3) 环境障碍物：将除目标实例以外的所有点体素化
+    # 3) 环境障碍物：将除目标实例以外的所有点体素化；若提供 current_joints 则先排除机械臂内的点
     other_points = []
     for lbl, pts in label_to_points.items():
         if lbl == best_label:
             continue
         other_points.extend(pts)
+
+    if other_points and current_joints is not None and len(current_joints) >= 6:
+        from aco_rrtstar_planner_node import filter_points_by_robot_aabbs
+        other_points = filter_points_by_robot_aabbs(other_points, current_joints)
 
     env_cloud = None
     if other_points:

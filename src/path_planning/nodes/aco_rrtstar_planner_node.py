@@ -194,6 +194,91 @@ def point_in_aabb(p, center, half_extents):
             cz - hz <= p[2] <= cz + hz)
 
 
+# 各连杆在 base 系下的近似半径（米），用于点云中排除机械臂
+LINK_SEGMENT_PADDING = 0.08
+
+
+def get_robot_arm_aabbs(joints, link_padding=None):
+    """
+    根据当前关节角用 FK 得到各 link 在 base_link 下的近似 AABB（每段连杆一个）。
+    joints: 长度为 6 的关节角（弧度）
+    link_padding: 每段连杆 AABB 的半轴外扩（米），默认 LINK_SEGMENT_PADDING
+    Returns: list[((cx,cy,cz), (hx,hy,hz))]，共 6 个（对应 6 段连杆）
+    """
+    if link_padding is None:
+        link_padding = LINK_SEGMENT_PADDING
+    poses = UR5eFK.fk_chain(tuple(joints))
+    if len(poses) < 2:
+        return []
+    aabbs = []
+    for i in range(len(poses) - 1):
+        a, b = poses[i], poses[i + 1]
+        cx = (a[0] + b[0]) / 2.0
+        cy = (a[1] + b[1]) / 2.0
+        cz = (a[2] + b[2]) / 2.0
+        hx = abs(b[0] - a[0]) / 2.0 + link_padding
+        hy = abs(b[1] - a[1]) / 2.0 + link_padding
+        hz = abs(b[2] - a[2]) / 2.0 + link_padding
+        aabbs.append(((cx, cy, cz), (hx, hy, hz)))
+    return aabbs
+
+
+def filter_points_by_robot_aabbs(points, joints, link_padding=None):
+    """
+    过滤点列表：去掉落在机械臂 AABB 内的点。点需在 base_link 系下。
+    points: iterable of (x,y,z) 或 (x,y,z,...)
+    joints: 长度 6 的关节角
+    Returns: list of (x,y,z) 不在机械臂内的点
+    """
+    aabbs = get_robot_arm_aabbs(joints, link_padding)
+    if not aabbs:
+        return list(points) if not hasattr(points, "__len__") else points
+    out = []
+    for p in points:
+        pt = (float(p[0]), float(p[1]), float(p[2]))
+        inside = False
+        for center, half in aabbs:
+            if point_in_aabb(pt, center, half):
+                inside = True
+                break
+        if not inside:
+            out.append(pt)
+    return out
+
+
+def filter_pointcloud_robot_arm(cloud_msg, joint_positions, frame_id="base_link", link_padding=None):
+    """
+    体素化前从点云中剔除落在机械臂 AABB 内的点。要求点云已在 frame_id 系下（如 base_link）。
+    joint_positions: 长度 6 的关节角（弧度），当前臂形
+    Returns: sensor_msgs/PointCloud2，仅含不在机械臂内的点，header 与 frame_id 同输入
+    """
+    if joint_positions is None or len(joint_positions) < 6:
+        return cloud_msg
+    try:
+        joints = tuple(float(joint_positions[i]) for i in range(6))
+    except (TypeError, ValueError, IndexError):
+        return cloud_msg
+    aabbs = get_robot_arm_aabbs(joints, link_padding)
+    if not aabbs:
+        return cloud_msg
+    kept = []
+    for p in pc2.read_points(cloud_msg, skip_nans=True, field_names=("x", "y", "z")):
+        pt = (float(p[0]), float(p[1]), float(p[2]))
+        inside = False
+        for center, half in aabbs:
+            if point_in_aabb(pt, center, half):
+                inside = True
+                break
+        if not inside:
+            kept.append(pt)
+    if not kept:
+        return cloud_msg
+    header = cloud_msg.header
+    if header.frame_id != frame_id:
+        header = Header(stamp=header.stamp, frame_id=frame_id)
+    return pc2.create_cloud_xyz32(header, kept)
+
+
 def get_ee_box_corners_in_base(T_ee, half_extents):
     """
     将末端执行器在 EE 系下的包围盒（中心在原点，半轴 half_extents=(hx,hy,hz)）
@@ -574,8 +659,8 @@ GAZEBO_DEFAULT_OBSTACLES = [
 ]
 
 # 默认虚拟抓取点：桌面中心（桌面上表面高度），与默认障碍物不重合
-# 取 (0.35, 0.0, 0.2)：桌面中心、z=0.2 桌面上表面
-DEFAULT_VIRTUAL_GRASP_POINT = (0.35, 0.0, 0.2)
+# 默认末端目标点 (base_link 系)，单位米
+DEFAULT_VIRTUAL_GRASP_POINT = (0.679967, -0.160081, 0.613571)
 
 
 # =============================================================================
@@ -620,6 +705,8 @@ class ACO_RRTStarPlannerNode:
         self.obstacles = []
         self.obstacles_from_cloud = []
         self.last_plan_time = None
+        self.current_joints = None  # 用于点云中排除机械臂
+        self.filter_pointcloud_robot_arm = rospy.get_param('~filter_pointcloud_robot_arm', True)
 
         self.obstacle_pub = rospy.Publisher('/path_planning/obstacles', MarkerArray, queue_size=1)
         self.aco_path_pub = rospy.Publisher('/path_planning/aco_path', Marker, queue_size=1)
@@ -655,6 +742,7 @@ class ACO_RRTStarPlannerNode:
                                   self.kinematics_client.EE_POSE_TOPIC)
         except Exception:
             pass
+        rospy.Subscriber('/joint_states', JointState, self._joint_state_cb, queue_size=1)
         rospy.Subscriber(self.pointcloud_topic, PointCloud2, self.pointcloud_cb, queue_size=1)
         if self.publish_joint_state_enabled:
             rospy.Timer(rospy.Duration(0.1), self.publish_joint_state)
@@ -669,6 +757,15 @@ class ACO_RRTStarPlannerNode:
         """仅调用一次：虚拟抓取点模式下启动时执行规划"""
         self.run_planning()
 
+    def _joint_state_cb(self, msg):
+        """更新当前关节角，供点云过滤机械臂使用"""
+        try:
+            name_to_pos = dict(zip(msg.name, msg.position))
+            if all(n in name_to_pos for n in self.joint_names):
+                self.current_joints = [name_to_pos[n] for n in self.joint_names]
+        except Exception:
+            pass
+
     def _compute_goal_from_grasp_point(self):
         """从虚拟抓取点 (x,y,z) 通过 IK 计算目标关节角，优先使用 motion_control"""
         q = self.kinematics_client.ik(self.virtual_grasp_point)
@@ -680,6 +777,8 @@ class ACO_RRTStarPlannerNode:
 
     def pointcloud_cb(self, msg):
         try:
+            if self.filter_pointcloud_robot_arm and self.current_joints is not None and getattr(msg.header, 'frame_id', '') == self.frame_id:
+                msg = filter_pointcloud_robot_arm(msg, self.current_joints, self.frame_id)
             obs = pointcloud_to_obstacles(msg, self.voxel_res, self.frame_id, self.bounds)
             if obs:
                 self.obstacles_from_cloud = obs

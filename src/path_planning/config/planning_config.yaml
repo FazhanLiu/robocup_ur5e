@@ -42,13 +42,13 @@ end_effector_collision_box: [0.02, 0.02, 0.05]
 
 # 起点与终点关节角 (弧度)
 home_joints: [0, -1.5708, 0, -1.5708, 0, 0]
-# 目标关节角：与 virtual_grasp_point 桌面中心 (0.35, 0, 0.2) 相适配，臂前伸下探、肘弯曲，不与桌面冲突
+# 目标关节角：与 virtual_grasp_point 相适配，臂前伸下探、肘弯曲，不与桌面冲突
 goal_joints: [0, -2.0, 1.2, -1.5708, -1.5708, 0]
 
-# 虚拟抓取点：作为路径规划的终点，设为桌面中心位置
+# 虚拟抓取点（末端默认目标点）：作为路径规划的终点
 # 与点云障碍物协同：点云全部转为障碍物 + 虚拟抓取点作为目标进行规划
-# 格式: [x, y, z] 米，base_link 系；(0.35, 0, 0.2) 桌面中心、桌面上表面高度
-virtual_grasp_point: [0.35, 0.0, 0.2]
+# 格式: [x, y, z] 米，base_link 系
+virtual_grasp_point: [0.679967, -0.160081, 0.613571]
 # 无点云时的备用：为 true 时，用 Gazebo 默认障碍物（箱子+地面）仍可规划
 use_virtual_grasp_only: true
 # 是否发布 /joint_states：与 arm_gazebo 同跑时设为 false，避免 TF_REPEATED_DATA
