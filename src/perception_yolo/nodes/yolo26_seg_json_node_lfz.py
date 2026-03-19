@@ -33,7 +33,11 @@ class Yolo26SegJsonNode:
         rospy.init_node("yolo26_seg_json", anonymous=False)
 
         self.bridge = CvBridge()
-        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/yolo26m-seg.pt")
+<<<<<<< HEAD
+        self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/best.pt")
+=======
+        self.model_path = HARDCODED_MODEL_PATH
+>>>>>>> 7ced643d70c8b3731586570e94065c481e54f894
         self.conf_threshold = float(rospy.get_param("~confidence_threshold", 0.5))
         self.print_interval = float(rospy.get_param("~print_interval", 0.2))
         self.sync_slop = float(rospy.get_param("~sync_slop", 0.08))
@@ -226,4 +230,9 @@ if __name__ == "__main__":
 
 
 # # 运行节点（native 容器内）
+<<<<<<< HEAD
+# 进入容器 docker compose run --rm perception_yolo_gpu_native bash
 # docker compose run --rm perception_yolo_gpu_native bash -lc "source /opt/ros/noetic/setup.bash && export ROS_MASTER_URI=http://127.0.0.1:11311 && python3 /workspace/src/perception_yolo/nodes/yolo26_seg_json_node.py _model_path:=/workspace/weights/yolo/yolo26m-seg.pt _confidence_threshold:=0.5"
+=======
+# docker compose run --rm perception_yolo_gpu_native bash -lc "source /opt/ros/noetic/setup.bash && export ROS_MASTER_URI=http://127.0.0.1:11311 && python3 /workspace/src/perception_yolo/nodes/yolo26_seg_json_node.py _confidence_threshold:=0.5"
+>>>>>>> 7ced643d70c8b3731586570e94065c481e54f894
