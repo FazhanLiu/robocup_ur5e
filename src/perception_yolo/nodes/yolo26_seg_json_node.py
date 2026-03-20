@@ -35,6 +35,8 @@ class Yolo26SegJsonNode:
         self.bridge = CvBridge()
         self.model_path = rospy.get_param("~model_path", "/workspace/weights/yolo/yolo26m-seg.pt")
         self.conf_threshold = float(rospy.get_param("~confidence_threshold", 0.5))
+        self.min_depth_m = float(rospy.get_param("~min_depth_m", 0.05))
+        self.max_depth_m = float(rospy.get_param("~max_depth_m", 10.0))
         self.print_interval = float(rospy.get_param("~print_interval", 0.2))
         self.sync_slop = float(rospy.get_param("~sync_slop", 0.08))
         self.sync_queue_size = int(rospy.get_param("~sync_queue_size", 10))
@@ -76,7 +78,13 @@ class Yolo26SegJsonNode:
         rospy.loginfo("Sync topics: %s | %s | %s", self.rgb_topic, self.depth_topic, self.camera_info_topic)
         rospy.loginfo("Output topic: %s", self.output_topic)
         rospy.loginfo("Enable topic: %s (start_enabled=%s)", self.enable_topic, str(self.enabled))
-        rospy.loginfo("conf_threshold=%.2f, print_interval=%.2fs", self.conf_threshold, self.print_interval)
+        rospy.loginfo(
+            "conf_threshold=%.2f, depth_range=[%.2f, %.2f]m, print_interval=%.2fs",
+            self.conf_threshold,
+            self.min_depth_m,
+            self.max_depth_m,
+            self.print_interval,
+        )
 
     def _enable_callback(self, msg):
         new_state = bool(msg.data)
@@ -120,6 +128,40 @@ class Yolo26SegJsonNode:
         xyz = Yolo26SegJsonNode._pixel_to_xyz(uc, vc, zc, fx, fy, cx, cy)
         return xyz
 
+    @staticmethod
+    def _bbox_center_3d_from_valid_depth(
+        x1, y1, x2, y2, depth_m, fx, fy, cx, cy, min_depth_m, max_depth_m
+    ):
+        h, w = depth_m.shape[:2]
+        x1 = max(0, min(int(round(x1)), w - 1))
+        x2 = max(0, min(int(round(x2)), w - 1))
+        y1 = max(0, min(int(round(y1)), h - 1))
+        y2 = max(0, min(int(round(y2)), h - 1))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        roi_depth = depth_m[y1:y2, x1:x2]
+        if roi_depth.size == 0:
+            return None
+
+        yy, xx = np.indices(roi_depth.shape)
+        u = (xx + x1).reshape(-1).astype(np.float32)
+        v = (yy + y1).reshape(-1).astype(np.float32)
+        z = roi_depth.reshape(-1).astype(np.float32)
+        valid = np.isfinite(z) & (z > min_depth_m) & (z < max_depth_m)
+        if not np.any(valid):
+            return None
+
+        u = u[valid]
+        v = v[valid]
+        z = z[valid]
+        uc = float(np.mean(u))
+        vc = float(np.mean(v))
+        zc = float(np.median(z))
+        x = (uc - cx) * zc / fx
+        y = (vc - cy) * zc / fy
+        return float(x), float(y), float(zc)
+
     def _callback(self, rgb_msg, depth_msg, cam_info_msg):
         if not self.enabled:
             return
@@ -154,13 +196,10 @@ class Yolo26SegJsonNode:
             return
 
         output = []
+        instance_id = 1
         for result in results:
             if result.boxes is None:
                 continue
-
-            masks = None
-            if result.masks is not None:
-                masks = result.masks.data.cpu().numpy()
 
             boxes = result.boxes
             names = result.names
@@ -173,27 +212,16 @@ class Yolo26SegJsonNode:
                 cls_id = int(box.cls[0])
                 name = str(names.get(cls_id, str(cls_id)))
 
-                center_xyz = None
-                if masks is not None and i < len(masks):
-                    mask = masks[i]
-                    if mask.shape[:2] != (h, w):
-                        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                    center_xyz = self._mask_center_3d(mask > 0.5, depth_m, fx, fy, cx, cy)
-
-                # 分割中心不可用时，回退 bbox 中心
-                if center_xyz is None:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                    u = int((x1 + x2) / 2)
-                    v = int((y1 + y2) / 2)
-                    u = max(0, min(u, w - 1))
-                    v = max(0, min(v, h - 1))
-                    z = float(depth_m[v, u])
-                    center_xyz = self._pixel_to_xyz(float(u), float(v), z, fx, fy, cx, cy)
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                center_xyz = self._bbox_center_3d_from_valid_depth(
+                    x1, y1, x2, y2, depth_m, fx, fy, cx, cy, self.min_depth_m, self.max_depth_m
+                )
 
                 if center_xyz is None:
                     continue
 
                 output.append({
+                    "instance_id": int(instance_id),
                     "name": name,
                     "confidence": round(conf, 3),
                     "frame_id": rgb_msg.header.frame_id,
@@ -204,6 +232,7 @@ class Yolo26SegJsonNode:
                         "z": round(center_xyz[2], 4),
                     },
                 })
+                instance_id += 1
 
         if output:
             payload = json.dumps(output, ensure_ascii=False, separators=(",", ":"))
@@ -226,4 +255,4 @@ if __name__ == "__main__":
 
 
 # # 运行节点（native 容器内）
-# docker compose run --rm perception_yolo_gpu_native bash -lc "source /opt/ros/noetic/setup.bash && export ROS_MASTER_URI=http://127.0.0.1:11311 && python3 /workspace/src/perception_yolo/nodes/yolo26_seg_json_node.py _model_path:=/workspace/weights/yolo/yolo26m-seg.pt _confidence_threshold:=0.5"
+# docker compose run --rm perception_yolo_gpu_native bash -lc "source /opt/ros/noetic/setup.bash && export ROS_MASTER_URI=http://127.0.0.1:11311 && python3 /workspace/src/perception_yolo/nodes/yolo26_seg_json_node.py _model_path:=/workspace/weights/yolo/best.pt _confidence_threshold:=0.5"
