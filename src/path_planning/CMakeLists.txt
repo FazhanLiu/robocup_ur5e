@@ -6,6 +6,7 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib_msgs
   rospy
   std_msgs
+  std_srvs
   geometry_msgs
   sensor_msgs
   visualization_msgs
@@ -35,6 +36,7 @@ catkin_package(
     actionlib_msgs
     rospy
     std_msgs
+    std_srvs
     geometry_msgs
     sensor_msgs
     visualization_msgs

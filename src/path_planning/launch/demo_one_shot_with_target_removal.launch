@@ -33,6 +33,14 @@
   <!-- Optional: 4x4 goal pose (base_link). When set, use plan_one_shot_from_goal_pose and ignore virtual_grasp_point/goal_joints. Format: "[[r00,r01,r02,x],[r10,r11,r12,y],[r20,r21,r22,z],[0,0,0,1]]" or 16 floats row-major. Default empty = use virtual_grasp_point + IK -->
   <arg name="goal_pose_4x4" default="" />
 
+  <!-- Optional: buffer + timestamp sync (call ~/run_planning_sync after launch) -->
+  <arg name="synced_capture_mode" default="false" />
+  <arg name="sync_buffer_seconds" default="10.0" />
+  <arg name="sync_tolerance_sec" default="0.05" />
+  <arg name="sync_buffer_include_seg" default="true" />
+  <arg name="detections_json_topic" default="/perception/yolo26_seg_detections" />
+  <arg name="bbox_instance_cloud_topic" default="/perception/yolo_bbox_instance_cloud" />
+
   <!-- Visualization / logging -->
   <arg name="publish_plan_markers" default="true" />
   <arg name="target_pose_frame_id" default="one_shot_target_pose" />
@@ -67,6 +75,13 @@
     <param name="goal_joints_default" value="$(arg goal_joints_default)" />
     <param name="goal_joints" value="$(arg goal_joints)" />
     <param name="goal_pose_4x4" value="$(arg goal_pose_4x4)" />
+
+    <param name="synced_capture_mode" value="$(arg synced_capture_mode)" />
+    <param name="sync_buffer_seconds" value="$(arg sync_buffer_seconds)" />
+    <param name="sync_tolerance_sec" value="$(arg sync_tolerance_sec)" />
+    <param name="sync_buffer_include_seg" value="$(arg sync_buffer_include_seg)" />
+    <param name="detections_json_topic" value="$(arg detections_json_topic)" />
+    <param name="bbox_instance_cloud_topic" value="$(arg bbox_instance_cloud_topic)" />
 
     <!-- Visualization / outputs -->
     <param name="publish_plan_markers" value="$(arg publish_plan_markers)" />
