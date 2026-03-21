@@ -4,13 +4,20 @@
   <arg name="graspnet_repo_path" default="/workspace/weights/graspnet/graspnet-baseline" />
   <arg name="raw_top_k" default="1000" />
   <arg name="num_grasp_candidates" default="5" />
-  <arg name="pointcloud_topic" default="/perception/yolo26_seg_cloud" />
+  <arg name="pointcloud_topic" default="/perception/yolo_bbox_instance_cloud" />
   <arg name="num_point" default="20000" />
   <arg name="voxel_size" default="0.005" />
   <arg name="label_field_name" default="label" />
   <arg name="task_decision_topic" default="/brain/task_decision" />
   <arg name="failure_topic" default="/perception/grasp_failure_reason" />
   <arg name="marker_topic" default="/perception/grasp_markers" />
+  <arg name="output_frame" default="base_link" />
+  <arg name="tf_lookup_timeout" default="0.2" />
+  <arg name="cloud_history_size" default="10" />
+  <arg name="source_stamp_tolerance" default="0.15" />
+  <arg name="publish_transformed_markers" default="true" />
+  <arg name="save_filtered_target_cloud" default="false" />
+  <arg name="filtered_cloud_save_dir" default="/workspace/weights/graspnet/debug_clouds" />
   <arg name="approach_filter" default="top_side" />
   <arg name="min_down_dot" default="0.0" />
   <arg name="max_up_dot" default="0.8" />
@@ -29,6 +36,13 @@
     <param name="task_decision_topic" value="$(arg task_decision_topic)" />
     <param name="failure_topic" value="$(arg failure_topic)" />
     <param name="marker_topic" value="$(arg marker_topic)" />
+    <param name="output_frame" value="$(arg output_frame)" />
+    <param name="tf_lookup_timeout" value="$(arg tf_lookup_timeout)" />
+    <param name="cloud_history_size" value="$(arg cloud_history_size)" />
+    <param name="source_stamp_tolerance" value="$(arg source_stamp_tolerance)" />
+    <param name="publish_transformed_markers" value="$(arg publish_transformed_markers)" />
+    <param name="save_filtered_target_cloud" value="$(arg save_filtered_target_cloud)" />
+    <param name="filtered_cloud_save_dir" value="$(arg filtered_cloud_save_dir)" />
     <param name="approach_filter" value="$(arg approach_filter)" />
     <param name="min_down_dot" value="$(arg min_down_dot)" />
     <param name="max_up_dot" value="$(arg max_up_dot)" />
