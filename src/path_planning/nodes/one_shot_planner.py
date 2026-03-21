@@ -170,6 +170,7 @@ def build_obstacles_from_yolo_instance_cloud(
             - 'half_extents':  (hx, hy, hz) 目标物体的半轴（items_list 查表或默认值）
             - 'obstacles': list[((cx,cy,cz),(hx,hy,hz))]，仅包含环境障碍物（不含目标物体自身）
             - 'env_cloud': sensor_msgs/PointCloud2，环境点云（仅 x,y,z），若无则为 None
+            - 'matched_label': int，与 target_center 匹配的实例 label（YOLO 实例 ID），供 raw 挖空合并用
 
         匹配失败或输入异常时返回 None。
     """
@@ -215,7 +216,7 @@ def build_obstacles_from_yolo_instance_cloud(
 
     if not label_to_points:
         rospy.logwarn("[OneShot] YOLO 实例点云为空，无法构建障碍物")
-        return []
+        return None
 
     # 选择到目标中心最近的实例 ID
     best_label = None
@@ -227,7 +228,7 @@ def build_obstacles_from_yolo_instance_cloud(
 
     if best_label is None:
         rospy.logwarn("[OneShot] 未能从实例点云中匹配目标物体")
-        return []
+        return None
 
     if best_dist2 is None or best_dist2 > center_match_radius * center_match_radius:
         rospy.logwarn(
@@ -235,7 +236,7 @@ def build_obstacles_from_yolo_instance_cloud(
             sqrt(best_dist2) if best_dist2 is not None else -1.0,
             center_match_radius,
         )
-        return []
+        return None
 
     # 2) 目标物体包围盒：中心使用传入的 target_center_xyz，半轴根据 class_id / items_list 确定
     class_id = label_to_class_id.get(best_label) if has_class_id else None
@@ -289,6 +290,7 @@ def build_obstacles_from_yolo_instance_cloud(
         "half_extents": tuple(float(x) for x in half_extents[:3]),
         "obstacles": obstacles,
         "env_cloud": env_cloud,
+        "matched_label": int(best_label),
     }
     return result
 
