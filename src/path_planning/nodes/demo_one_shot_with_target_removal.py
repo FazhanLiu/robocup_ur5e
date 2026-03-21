@@ -27,6 +27,10 @@
   rosrun path_planning demo_one_shot_with_target_removal.py
   rosrun path_planning demo_one_shot_with_target_removal.py _target_class_id:=0
 
+方式 B 补全（默认开）：
+  ~mode_b_merge_raw_obstacles:=true 且同步/订阅得到对齐 raw 时，在实例云体素障碍之外，
+  再对 raw 按「目标实例 label」挖空后体素化并**合并**，以补全实例分割中常缺失的**桌面**等。
+
 同步缓冲模式（可选）：
   ~synced_capture_mode:=true 时，启动后不立即规划；先 rosservice call <node>/run_planning_sync
   再在 ~sync_buffer_seconds（默认 10）秒内临时订阅：
@@ -69,7 +73,10 @@ from aco_rrtstar_planner_node import (
     GAZEBO_DEFAULT_OBSTACLES,
     KinematicsClient,
 )
-from pointcloud_target_removal import remove_target_region_from_pointcloud
+from pointcloud_target_removal import (
+    remove_target_region_from_pointcloud,
+    remove_target_region_from_pointcloud_by_instance_label,
+)
 
 
 def _param_bool(name, default=False):
@@ -449,12 +456,47 @@ def _run_planning_pipeline(
                         obstacles = target_and_env.get("obstacles") or []
                         cls_id = target_and_env.get("class_id")
                         center = target_and_env.get("center")
+                        matched_label = target_and_env.get("matched_label")
                         rospy.loginfo(
                             "[DemoTargetRemoval] YOLO 目标 class_id=%s, center=%s, 环境障碍物数量=%d",
                             str(cls_id),
                             ["{:.3f}".format(c) for c in center] if center is not None else "None",
                             len(obstacles),
                         )
+                        # raw 按目标实例挖空后体素化并合并：补全桌面等（实例云常不含桌面）
+                        if (
+                            _param_bool("~mode_b_merge_raw_obstacles", True)
+                            and aligned_raw_msg is not None
+                            and matched_label is not None
+                        ):
+                            raw_for_merge = _transform_pointcloud_to_frame(
+                                aligned_raw_msg, frame_id, tf_buffer, timeout=1.0
+                            )
+                            if raw_for_merge is not None:
+                                from aco_rrtstar_planner_node import filter_pointcloud_robot_arm
+
+                                filtered_raw = remove_target_region_from_pointcloud_by_instance_label(
+                                    raw_for_merge,
+                                    seg_instance_in_frame,
+                                    int(matched_label),
+                                    padding=removal_padding,
+                                    output_frame_id=frame_id,
+                                )
+                                cloud_no_robot = filter_pointcloud_robot_arm(
+                                    filtered_raw, start_joints, frame_id=frame_id
+                                )
+                                raw_obs = pointcloud_to_obstacles(
+                                    cloud_no_robot,
+                                    voxel_res=voxel_res,
+                                    frame_id=frame_id,
+                                    bounds=bounds,
+                                )
+                                if raw_obs:
+                                    obstacles = list(obstacles) + raw_obs
+                                    rospy.loginfo(
+                                        "[DemoTargetRemoval] Mode B 合并 raw 体素障碍: +%d（含桌面等场景）",
+                                        len(raw_obs),
+                                    )
                         if not obstacles:
                             obstacles = None
 
