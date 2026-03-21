@@ -16,6 +16,7 @@ $DOCKER_COMPOSE up -d "$SERVICE_NAME"
 sleep 1
 docker exec -it "$CONTAINER_NAME" bash -c '
   source /opt/ros/noetic/setup.bash 2>/dev/null || true
+  # 标准镜像会把最新消息与 grasp 节点编译到 /workspace/devel
   [ -f /workspace/devel/setup.bash ] && source /workspace/devel/setup.bash
   export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
   export ROS_IP=${ROS_IP:-}

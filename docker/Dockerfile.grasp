@@ -56,10 +56,12 @@ COPY src/common_msgs /workspace/src/common_msgs
 COPY src/perception_grasp /workspace/src/perception_grasp
 
 # 编译
+# 只编译 common_msgs 和 perception_grasp，保证运行镜像里的 /workspace/devel
+# 直接包含最新的消息定义（例如 GraspCandidate.width）和 grasp 节点代码。
 RUN /bin/bash -c "source /opt/ros/noetic/setup.bash && \
     cd /workspace && \
     catkin config --extend /opt/ros/noetic && \
-    catkin build"
+    catkin build common_msgs perception_grasp"
 
 # ============================================================================
 # Stage 2: Runtime
@@ -75,8 +77,8 @@ RUN pip3 install --no-cache-dir --ignore-installed PyYAML -r /tmp/requirements.t
 COPY --from=grasp_builder /workspace/devel /workspace/devel
 COPY --from=grasp_builder /workspace/src /workspace/src
 
-# 创建模型目录
-RUN mkdir -p /workspace/graspnet_checkpoints
+# 创建默认权重目录（运行时通常会挂载宿主机 ./weights 到 /workspace/weights）
+RUN mkdir -p /workspace/weights/graspnet
 
 WORKDIR /workspace
 

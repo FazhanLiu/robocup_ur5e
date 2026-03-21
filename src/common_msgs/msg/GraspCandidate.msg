@@ -3,3 +3,4 @@
 
 geometry_msgs/PoseStamped pose  # 抓取姿态（在相机或机器人坐标系中）
 float32 quality                  # 抓取质量评分 [0.0, 1.0]
+float32 width                    # 夹爪开合宽度（米）
