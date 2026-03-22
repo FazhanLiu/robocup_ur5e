@@ -1,6 +1,7 @@
 # perception_grasp/nodes 说明
 
 本文档说明 `perception_grasp/nodes` 目录下在线抓取相关节点的用途、输入输出、联调方式和常见注意事项。
+那个要权重的私信我，我单独发。
 
 ## 1. 目录内容
 
