@@ -6,11 +6,18 @@
   <arg name="start_brain" default="false" />
   <arg name="test_mode" default="false" />
   <arg name="single_cycle" default="true" />
+  <arg name="loop_until_no_targets" default="true" />
+  <arg name="no_target_timeout" default="3.0" />
   <arg name="path_planning_position_only" default="false" />
+  <arg name="grasp_pose_source" default="hybrid" />
   <arg name="direct_grasp_offset_x" default="0.0" />
   <arg name="direct_grasp_offset_y" default="0.0" />
   <arg name="direct_grasp_offset_z" default="0.0" />
   <arg name="direct_grasp_local_x_offset" default="0.15" />
+  <arg name="cube_direct_grasp_offset_mode" default="local_x" />
+  <arg name="cube_direct_grasp_base_x_offset" default="0.15" />
+  <arg name="cube_direct_grasp_base_y_offset" default="0.0" />
+  <arg name="cube_direct_grasp_base_z_offset" default="0.0" />
   <arg name="direct_grasp_min_z" default="0.05" />
   <arg name="direct_grasp_max_z" default="1.20" />
   <arg name="direct_grasp_roll" default="3.141592653589793" />
@@ -22,11 +29,57 @@
   <arg name="place_bin_color" default="green" />
   <arg name="place_motion_max_velocity" default="1.0" />
   <arg name="place_motion_max_acceleration" default="1.0" />
-  <arg name="preferred_target_label" default="cube" />
+  <arg name="preferred_target_label" default="" />
+  <arg name="defer_cube_until_others" default="false" />
+  <arg name="alternate_pick_categories" default="false" />
+  <arg name="alternate_start_category" default="cube" />
   <arg name="cube_class_labels" default="['class_1', 'class_3', 'class_5', 'class_7']" />
   <arg name="green_bin_joints" default="[-0.4696, -1.1530, -1.6126, 1.1743, 1.5815, -0.4750]" />
   <arg name="blue_bin_joints" default="[1.4744, -1.0557, -1.4196, 0.9190, 1.5769, 1.4693]" />
+  <arg name="cube_place_joints" default="[0.3000, 0.7006, 1.5000, -2.5000, 0.0002, 0.0000]" />
   <arg name="yolo_enable_topic" default="/perception/yolo26_seg_enabled" />
+  <arg name="graspnet_task_decision_topic" default="/brain/task_decision" />
+  <arg name="graspnet_candidate_topic" default="/perception/grasp_candidates" />
+  <arg name="graspnet_failure_topic" default="/perception/grasp_failure_reason" />
+  <arg name="graspnet_request_timeout" default="5.0" />
+  <arg name="graspnet_response_stamp_tolerance" default="0.3" />
+  <arg name="target_grasp_pose_topic" default="/brain/target_grasp_pose" />
+  <arg name="target_grasp_tf_frame" default="brain_target_grasp_pose" />
+  <arg name="publish_target_grasp_tf" default="true" />
+  <arg name="scene_wide_non_cube_ranking" default="false" />
+  <arg name="debug_non_cube_only" default="false" />
+  <arg name="execute_after_scene_ranking" default="false" />
+  <arg name="scene_grasp_per_target_timeout" default="1.0" />
+  <arg name="scene_grasp_candidate_settle_time" default="0.15" />
+  <arg name="scene_rank_min_pose_z" default="0.10" />
+  <arg name="scene_rank_min_top_score" default="0.0" />
+  <arg name="scene_preobserve_enabled" default="false" />
+  <arg name="scene_preobserve_base_x_offset" default="0.40" />
+  <arg name="scene_preobserve_base_y_offset" default="0.0" />
+  <arg name="scene_preobserve_base_z_offset" default="0.0" />
+  <arg name="scene_preobserve_max_velocity" default="0.6" />
+  <arg name="scene_preobserve_max_acceleration" default="0.6" />
+  <arg name="scene_preobserve_refresh_timeout" default="1.5" />
+  <arg name="non_cube_ranked_grasp_pose_topic" default="/brain/non_cube_ranked_grasp_poses" />
+  <arg name="non_cube_ranked_grasp_marker_topic" default="/brain/non_cube_ranked_grasp_markers" />
+  <arg name="motion_control_active_grasp_category_param" default="/motion_control/active_grasp_category" />
+  <arg name="motion_control_active_grasp_width_param" default="/motion_control/active_grasp_target_width_m" />
+  <arg name="non_cube_bbox_width_scale" default="1.0" />
+  <arg name="non_cube_bbox_width_margin" default="-0.18" />
+  <arg name="non_cube_bbox_width_min_m" default="0.01" />
+  <arg name="non_cube_bbox_width_max_m" default="0.10" />
+  <arg name="cube_nominal_grasp_width_m" default="0.0278" />
+  <arg name="non_cube_fixed_width_multiplier" default="2.5" />
+  <arg name="exclude_cubes_on_scale" default="true" />
+  <arg name="scale_filter_world_frame" default="world" />
+  <arg name="scale_filter_corner_output_frame" default="base_link" />
+  <arg name="scale_filter_corner_world_z" default="0.275" />
+  <arg name="scale_filter_volume_down_m" default="0.80" />
+  <arg name="scale_filter_min_world_z" default="0.54" />
+  <arg name="scale_filter_polygon_world_xy" default="[[0.486, 0.304], [0.627, 0.185], [0.834, 0.432], [0.693, 0.550]]" />
+  <arg name="publish_scale_filter_corners" default="true" />
+  <arg name="scale_filter_corners_topic" default="/brain/scale_filter_corners" />
+  <arg name="scale_filter_corners_marker_topic" default="/brain/scale_filter_corners_markers" />
   <param name="ros_master_uri" value="$(arg ros_master_uri)" />
 
   <!-- Brain 容器启动时一并拉起 motion_control，并在进程退出时自动重启 -->
@@ -37,11 +90,18 @@
     <param name="update_rate" value="10.0" />
     <param name="test_mode" value="$(arg test_mode)" />
     <param name="single_cycle" value="$(arg single_cycle)" />
+    <param name="loop_until_no_targets" value="$(arg loop_until_no_targets)" />
+    <param name="no_target_timeout" value="$(arg no_target_timeout)" />
     <param name="path_planning_position_only" value="$(arg path_planning_position_only)" />
+    <param name="grasp_pose_source" value="$(arg grasp_pose_source)" />
     <param name="direct_grasp_offset_x" value="$(arg direct_grasp_offset_x)" />
     <param name="direct_grasp_offset_y" value="$(arg direct_grasp_offset_y)" />
     <param name="direct_grasp_offset_z" value="$(arg direct_grasp_offset_z)" />
     <param name="direct_grasp_local_x_offset" value="$(arg direct_grasp_local_x_offset)" />
+    <param name="cube_direct_grasp_offset_mode" value="$(arg cube_direct_grasp_offset_mode)" />
+    <param name="cube_direct_grasp_base_x_offset" value="$(arg cube_direct_grasp_base_x_offset)" />
+    <param name="cube_direct_grasp_base_y_offset" value="$(arg cube_direct_grasp_base_y_offset)" />
+    <param name="cube_direct_grasp_base_z_offset" value="$(arg cube_direct_grasp_base_z_offset)" />
     <param name="direct_grasp_min_z" value="$(arg direct_grasp_min_z)" />
     <param name="direct_grasp_max_z" value="$(arg direct_grasp_max_z)" />
     <param name="direct_grasp_roll" value="$(arg direct_grasp_roll)" />
@@ -54,9 +114,55 @@
     <param name="place_motion_max_velocity" value="$(arg place_motion_max_velocity)" />
     <param name="place_motion_max_acceleration" value="$(arg place_motion_max_acceleration)" />
     <param name="preferred_target_label" value="$(arg preferred_target_label)" />
+    <param name="defer_cube_until_others" value="$(arg defer_cube_until_others)" />
+    <param name="alternate_pick_categories" value="$(arg alternate_pick_categories)" />
+    <param name="alternate_start_category" value="$(arg alternate_start_category)" />
     <rosparam param="cube_class_labels" subst_value="true">$(arg cube_class_labels)</rosparam>
     <rosparam param="green_bin_joints" subst_value="true">$(arg green_bin_joints)</rosparam>
     <rosparam param="blue_bin_joints" subst_value="true">$(arg blue_bin_joints)</rosparam>
+    <rosparam param="cube_place_joints" subst_value="true">$(arg cube_place_joints)</rosparam>
     <param name="yolo_enable_topic" value="$(arg yolo_enable_topic)" />
+    <param name="graspnet_task_decision_topic" value="$(arg graspnet_task_decision_topic)" />
+    <param name="graspnet_candidate_topic" value="$(arg graspnet_candidate_topic)" />
+    <param name="graspnet_failure_topic" value="$(arg graspnet_failure_topic)" />
+    <param name="graspnet_request_timeout" value="$(arg graspnet_request_timeout)" />
+    <param name="graspnet_response_stamp_tolerance" value="$(arg graspnet_response_stamp_tolerance)" />
+    <param name="target_grasp_pose_topic" value="$(arg target_grasp_pose_topic)" />
+    <param name="target_grasp_tf_frame" value="$(arg target_grasp_tf_frame)" />
+    <param name="publish_target_grasp_tf" value="$(arg publish_target_grasp_tf)" />
+    <param name="scene_wide_non_cube_ranking" value="$(arg scene_wide_non_cube_ranking)" />
+    <param name="debug_non_cube_only" value="$(arg debug_non_cube_only)" />
+    <param name="execute_after_scene_ranking" value="$(arg execute_after_scene_ranking)" />
+    <param name="scene_grasp_per_target_timeout" value="$(arg scene_grasp_per_target_timeout)" />
+    <param name="scene_grasp_candidate_settle_time" value="$(arg scene_grasp_candidate_settle_time)" />
+    <param name="scene_rank_min_pose_z" value="$(arg scene_rank_min_pose_z)" />
+    <param name="scene_rank_min_top_score" value="$(arg scene_rank_min_top_score)" />
+    <param name="scene_preobserve_enabled" value="$(arg scene_preobserve_enabled)" />
+    <param name="scene_preobserve_base_x_offset" value="$(arg scene_preobserve_base_x_offset)" />
+    <param name="scene_preobserve_base_y_offset" value="$(arg scene_preobserve_base_y_offset)" />
+    <param name="scene_preobserve_base_z_offset" value="$(arg scene_preobserve_base_z_offset)" />
+    <param name="scene_preobserve_max_velocity" value="$(arg scene_preobserve_max_velocity)" />
+    <param name="scene_preobserve_max_acceleration" value="$(arg scene_preobserve_max_acceleration)" />
+    <param name="scene_preobserve_refresh_timeout" value="$(arg scene_preobserve_refresh_timeout)" />
+    <param name="non_cube_ranked_grasp_pose_topic" value="$(arg non_cube_ranked_grasp_pose_topic)" />
+    <param name="non_cube_ranked_grasp_marker_topic" value="$(arg non_cube_ranked_grasp_marker_topic)" />
+    <param name="motion_control_active_grasp_category_param" value="$(arg motion_control_active_grasp_category_param)" />
+    <param name="motion_control_active_grasp_width_param" value="$(arg motion_control_active_grasp_width_param)" />
+    <param name="non_cube_bbox_width_scale" value="$(arg non_cube_bbox_width_scale)" />
+    <param name="non_cube_bbox_width_margin" value="$(arg non_cube_bbox_width_margin)" />
+    <param name="non_cube_bbox_width_min_m" value="$(arg non_cube_bbox_width_min_m)" />
+    <param name="non_cube_bbox_width_max_m" value="$(arg non_cube_bbox_width_max_m)" />
+    <param name="cube_nominal_grasp_width_m" value="$(arg cube_nominal_grasp_width_m)" />
+    <param name="non_cube_fixed_width_multiplier" value="$(arg non_cube_fixed_width_multiplier)" />
+    <param name="exclude_cubes_on_scale" value="$(arg exclude_cubes_on_scale)" />
+    <param name="scale_filter_world_frame" value="$(arg scale_filter_world_frame)" />
+    <param name="scale_filter_corner_output_frame" value="$(arg scale_filter_corner_output_frame)" />
+    <param name="scale_filter_corner_world_z" value="$(arg scale_filter_corner_world_z)" />
+    <param name="scale_filter_volume_down_m" value="$(arg scale_filter_volume_down_m)" />
+    <param name="scale_filter_min_world_z" value="$(arg scale_filter_min_world_z)" />
+    <rosparam param="scale_filter_polygon_world_xy" subst_value="true">$(arg scale_filter_polygon_world_xy)</rosparam>
+    <param name="publish_scale_filter_corners" value="$(arg publish_scale_filter_corners)" />
+    <param name="scale_filter_corners_topic" value="$(arg scale_filter_corners_topic)" />
+    <param name="scale_filter_corners_marker_topic" value="$(arg scale_filter_corners_marker_topic)" />
   </node>
 </launch>

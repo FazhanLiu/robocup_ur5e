@@ -2,7 +2,7 @@
 """
 GraspNet Estimator Node
 Author: Muye Yuan
-Environment: CUDA 11.3 + ROS Noetic (GraspNet-1Billion legacy requirements)
+Environment: CUDA 12.8 + ROS Noetic + Python 3.10 (RTX 50 / sm_120 ready)
 """
 
 import os
@@ -20,7 +20,15 @@ from sensor_msgs.msg import Image, PointCloud2, CameraInfo
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 from std_msgs.msg import String
 from std_msgs.msg import ColorRGBA
-from common_msgs.msg import GraspCandidate, DetectedObject, TaskDecision
+try:
+    # Import only the generated message modules this node actually needs.
+    # This avoids pulling in unrelated messages such as PathPlanRequest,
+    # which drags moveit_msgs into older grasp images.
+    from common_msgs.msg._GraspCandidate import GraspCandidate
+    from common_msgs.msg._DetectedObject import DetectedObject
+    from common_msgs.msg._TaskDecision import TaskDecision
+except ImportError:
+    from common_msgs.msg import GraspCandidate, DetectedObject, TaskDecision
 import sensor_msgs.point_cloud2 as pc2
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -43,7 +51,7 @@ class GraspEstimatorNode:
         rospy.loginfo("GraspNet Estimator Node Initializing")
         rospy.loginfo("=" * 60)
         
-        # 设备检查（CUDA 11.3）
+        # 设备检查（CUDA 12.8 / PyTorch cu128）
         self.device = self._setup_device()
         
         # 参数配置
@@ -78,8 +86,8 @@ class GraspEstimatorNode:
             '/workspace/weights/graspnet/debug_clouds',
         )
         self.approach_filter = rospy.get_param('~approach_filter', 'top_side')
-        self.min_down_dot = float(rospy.get_param('~min_down_dot', 0.25))
-        self.max_up_dot = float(rospy.get_param('~max_up_dot', 0.2))
+        self.min_down_dot = float(rospy.get_param('~min_down_dot', 0.0))
+        self.max_up_dot = float(rospy.get_param('~max_up_dot', 0.8))
         self.min_gripper_width = float(rospy.get_param('~min_gripper_width', 0.0178))
         self.max_gripper_width = float(rospy.get_param('~max_gripper_width', 0.1006))
         
@@ -176,16 +184,16 @@ class GraspEstimatorNode:
         rospy.loginfo("[Grasp] Initialization complete. Ready to estimate grasps!")
         
     def _setup_device(self):
-        """设置 CUDA 11.3 环境"""
+        """设置 CUDA 12.8 / PyTorch cu128 环境"""
         if torch.cuda.is_available():
             device = torch.device('cuda')
             cuda_version = torch.version.cuda
             rospy.loginfo(f"[Grasp] CUDA available: {torch.cuda.get_device_name(0)}")
             rospy.loginfo(f"[Grasp] CUDA version: {cuda_version}")
             
-            # 警告：如果 CUDA 版本不是 11.3
-            if cuda_version != "11.3":
-                rospy.logwarn(f"[Grasp] Expected CUDA 11.3, but got {cuda_version}. GraspNet may have compatibility issues.")
+            # 警告：如果 CUDA 版本不是 12.8 系列
+            if not str(cuda_version).startswith("12.8"):
+                rospy.logwarn(f"[Grasp] Expected a CUDA 12.8-class runtime for RTX 50 / sm_120, but got CUDA {cuda_version}. GraspNet may have compatibility issues.")
         else:
             device = torch.device('cpu')
             rospy.logwarn("[Grasp] CUDA not available. Running on CPU (NOT RECOMMENDED for GraspNet)")

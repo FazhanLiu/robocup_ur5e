@@ -116,3 +116,5 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# Grasp debug point clouds
+weights/graspnet/debug_clouds/

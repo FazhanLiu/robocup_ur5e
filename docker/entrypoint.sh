@@ -3,6 +3,13 @@
 
 set -e
 
+export CONDA_DIR=${CONDA_DIR:-/opt/conda}
+export GRASP_PYTHON_ENV=${GRASP_PYTHON_ENV:-/opt/conda/envs/grasp-py310}
+if [ -d "$GRASP_PYTHON_ENV" ]; then
+    export PATH="$GRASP_PYTHON_ENV/bin:$CONDA_DIR/bin:$PATH"
+    export LD_LIBRARY_PATH="$GRASP_PYTHON_ENV/lib/python3.10/site-packages/torch/lib:${LD_LIBRARY_PATH}"
+fi
+
 # 设置 ROS 环境变量
 source /opt/ros/noetic/setup.bash
 
@@ -22,6 +29,16 @@ done
 # 配置 ROS_MASTER_URI（从环境变量读取，默认指向 VirtualBox VM）
 export ROS_MASTER_URI=${ROS_MASTER_URI:-http://192.168.56.101:11311}
 export ROS_IP=${ROS_IP:-$(hostname -I | awk '{print $1}')}
+
+"${GRASP_PYTHON_ENV}/bin/python" - <<'PY_INFO'
+try:
+    import sys
+    import torch
+    print(f"Python Runtime: {sys.version.split()[0]}")
+    print(f"PyTorch Runtime: {torch.__version__} | CUDA {torch.version.cuda} | CUDA available={torch.cuda.is_available()}")
+except Exception as exc:
+    print(f"PyTorch Runtime: unavailable ({exc})")
+PY_INFO
 
 echo "========================================"
 echo "ROS Environment:"

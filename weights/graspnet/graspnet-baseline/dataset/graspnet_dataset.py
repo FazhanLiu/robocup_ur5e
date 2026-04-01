@@ -263,11 +263,11 @@ def load_grasp_labels(root):
 
 def collate_fn(batch):
     if type(batch[0]).__module__ == 'numpy':
-        return torch.stack([torch.from_numpy(b) for b in batch], 0)
+        return torch.stack([torch.tensor(np.asarray(b)) for b in batch], 0)
     elif isinstance(batch[0], container_abcs.Mapping):
         return {key:collate_fn([d[key] for d in batch]) for key in batch[0]}
     elif isinstance(batch[0], container_abcs.Sequence):
-        return [[torch.from_numpy(sample) for sample in b] for b in batch]
+        return [[torch.tensor(np.asarray(sample)) for sample in b] for b in batch]
     
     raise TypeError("batch must contain tensors, dicts or lists; found {}".format(type(batch[0])))
 

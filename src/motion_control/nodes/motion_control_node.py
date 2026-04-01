@@ -158,7 +158,32 @@ class MotionControlNode:
             'robotiq_85_left_knuckle_joint',
         )
         self.gripper_open_position = float(rospy.get_param('~gripper_open_position', 0.0))
-        self.gripper_closed_position = float(rospy.get_param('~gripper_closed_position', 0.72))
+        self.gripper_closed_position_cube = float(
+            rospy.get_param('~gripper_closed_position_cube', 0.66)
+        )
+        self.gripper_closed_position_non_cube = float(
+            rospy.get_param(
+                '~gripper_closed_position_non_cube',
+                min(0.80, self.gripper_closed_position_cube * 2.0),
+            )
+        )
+        self.gripper_closed_position = float(
+            rospy.get_param('~gripper_closed_position', self.gripper_closed_position_non_cube)
+        )
+        self.active_grasp_category_param = rospy.get_param(
+            '~active_grasp_category_param',
+            '/motion_control/active_grasp_category',
+        )
+        self.active_grasp_target_width_param = rospy.get_param(
+            '~active_grasp_target_width_param',
+            '/motion_control/active_grasp_target_width_m',
+        )
+        self.non_cube_width_control_enabled = bool(
+            rospy.get_param('~non_cube_width_control_enabled', True)
+        )
+        self.non_cube_width_min_m = float(rospy.get_param('~non_cube_width_min_m', 0.01))
+        self.non_cube_width_max_m = float(rospy.get_param('~non_cube_width_max_m', 0.10))
+        self._active_gripper_closed_target = self.gripper_closed_position_non_cube
         self.gripper_motion_time = float(rospy.get_param('~gripper_motion_time', 1.0))
         self.gripper_wait_timeout = float(rospy.get_param('~gripper_wait_timeout', 3.0))
         self.gripper_position_tolerance = float(rospy.get_param('~gripper_position_tolerance', 0.03))
@@ -202,11 +227,13 @@ class MotionControlNode:
         self._gripper_server_reported = False
         self._latest_gripper_state = None
         rospy.loginfo(
-            "[MotionControl] Gripper config: action=%s joint=%s open=%.3f closed=%.3f motion_time=%.2fs tol=%.3f retries=%d settle=%.2fs skip_holding=%s accept_partial=%s release_min_closed_err=%.3f empty_tol=%.3f hold_dist=[%.3f, %.3f]",
+            "[MotionControl] Gripper config: action=%s joint=%s open=%.3f closed=%.3f cube_closed=%.3f non_cube_closed=%.3f motion_time=%.2fs tol=%.3f retries=%d settle=%.2fs skip_holding=%s accept_partial=%s release_min_closed_err=%.3f empty_tol=%.3f hold_dist=[%.3f, %.3f]",
             self.gripper_action_name,
             self.gripper_joint_name,
             self.gripper_open_position,
             self.gripper_closed_position,
+            self.gripper_closed_position_cube,
+            self.gripper_closed_position_non_cube,
             self.gripper_motion_time,
             self.gripper_position_tolerance,
             self.gripper_grasp_retry_count,
@@ -823,10 +850,16 @@ class MotionControlNode:
             rospy.sleep(0.1)
         return False, actual if 'actual' in locals() else None
 
-    def _get_gripper_holding_state(self, timeout_sec: float = 0.25) -> Tuple[Optional[bool], str]:
+    def _get_gripper_holding_state(
+        self,
+        timeout_sec: float = 0.25,
+        closed_target: Optional[float] = None,
+    ) -> Tuple[Optional[bool], str]:
+        if closed_target is None:
+            closed_target = self._active_gripper_closed_target
         actual = self._get_gripper_actual_position(timeout_sec=timeout_sec)
         if actual is not None:
-            closed_error = self._wrapped_position_error(actual, self.gripper_closed_position)
+            closed_error = self._wrapped_position_error(actual, closed_target)
             if closed_error <= self.gripper_empty_grasp_closed_tolerance:
                 return False, (
                     "mode=fully_closed actual=%.4f closed_err=%.4f tol=%.4f"
@@ -857,7 +890,7 @@ class MotionControlNode:
             return None, "unknown: no fingertip TF or gripper controller state"
 
         open_error = self._wrapped_position_error(actual, self.gripper_open_position)
-        closed_error = self._wrapped_position_error(actual, self.gripper_closed_position)
+        closed_error = self._wrapped_position_error(actual, closed_target)
         holding = (
             open_error > self.gripper_position_tolerance
             and closed_error > self.gripper_holding_closed_margin
@@ -894,6 +927,38 @@ class MotionControlNode:
             or "timeout" in text
             or "not found" in text
         )
+
+    def _resolve_gripper_closed_target(self) -> Tuple[float, str]:
+        category = str(rospy.get_param(self.active_grasp_category_param, '') or '').strip().lower()
+        if category == 'scale_cube':
+            pos = float(rospy.get_param('~gripper_closed_position_scale_cube', 0.66))
+            return pos, category
+        if category == 'cube':
+            return self.gripper_closed_position_cube, category
+
+        if category == 'non_cube':
+            if self.non_cube_width_control_enabled and self.non_cube_width_max_m > self.non_cube_width_min_m:
+                try:
+                    requested_width_m = float(rospy.get_param(self.active_grasp_target_width_param, -1.0))
+                except Exception:
+                    requested_width_m = -1.0
+
+                if requested_width_m > 0.0:
+                    clamped_width = max(
+                        self.non_cube_width_min_m,
+                        min(self.non_cube_width_max_m, requested_width_m),
+                    )
+                    span = max(1e-6, self.non_cube_width_max_m - self.non_cube_width_min_m)
+                    close_ratio = (self.non_cube_width_max_m - clamped_width) / span
+                    close_ratio = float(np.clip(close_ratio, 0.0, 1.0))
+                    target = self.gripper_open_position + close_ratio * (
+                        self.gripper_closed_position_non_cube - self.gripper_open_position
+                    )
+                    return float(target), f"non_cube(width={clamped_width:.4f}m)"
+
+            return self.gripper_closed_position_non_cube, category
+
+        return self.gripper_closed_position, category or 'default'
 
     def _send_gripper_position(self, position: float, label: str) -> Tuple[bool, str]:
         if not self._ensure_gripper_server():
@@ -942,16 +1007,19 @@ class MotionControlNode:
         attempts = max(1, int(self.gripper_grasp_retry_count))
         last_message = "grasp_not_attempted"
         actual_before = self._get_gripper_actual_position(timeout_sec=0.2)
+        closed_target, active_category = self._resolve_gripper_closed_target()
+        self._active_gripper_closed_target = closed_target
         rospy.loginfo(
-            "[MotionControl] Gripper grasp requested: closed_target=%.4f actual_before=%s attempts=%d",
-            self.gripper_closed_position,
+            "[MotionControl] Gripper grasp requested: category=%s closed_target=%.4f actual_before=%s attempts=%d",
+            active_category,
+            closed_target,
             "None" if actual_before is None else f"{actual_before:.4f}",
             attempts,
         )
 
         for attempt in range(1, attempts + 1):
             success, message = self._send_gripper_position(
-                self.gripper_closed_position,
+                closed_target,
                 "Gripper grasp attempt %d/%d" % (attempt, attempts),
             )
             last_message = message
@@ -971,7 +1039,8 @@ class MotionControlNode:
                     return True, f"{message} | holding check skipped"
 
                 holding, holding_message = self._get_gripper_holding_state(
-                    timeout_sec=max(0.25, self.gripper_post_grasp_settle_time + 0.1)
+                    timeout_sec=max(0.25, self.gripper_post_grasp_settle_time + 0.1),
+                    closed_target=closed_target,
                 )
                 if holding is False:
                     full_message = f"{message} | empty grasp detected: {holding_message}"
@@ -1020,6 +1089,7 @@ class MotionControlNode:
             "Gripper release",
         )
         if success:
+            self._active_gripper_closed_target = self.gripper_closed_position
             self.gripper_result_pub.publish(Bool(data=False))
             rospy.loginfo("[MotionControl] %s", message)
             return success, message
@@ -1027,7 +1097,8 @@ class MotionControlNode:
         # Some runs return ABORTED even though fingers opened enough for the next pick.
         actual = self._get_gripper_actual_position(timeout_sec=0.5)
         if actual is not None:
-            closed_error = self._wrapped_position_error(actual, self.gripper_closed_position)
+            closed_target = self._active_gripper_closed_target
+            closed_error = self._wrapped_position_error(actual, closed_target)
             if closed_error >= self.gripper_release_min_closed_error:
                 partial_message = (
                     "Gripper release accepted as partial-open: actual=%.4f closed_err=%.4f "
@@ -1039,6 +1110,7 @@ class MotionControlNode:
                         message,
                     )
                 )
+                self._active_gripper_closed_target = self.gripper_closed_position
                 self.gripper_result_pub.publish(Bool(data=False))
                 rospy.logwarn("[MotionControl] %s", partial_message)
                 return True, partial_message

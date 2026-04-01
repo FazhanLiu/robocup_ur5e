@@ -31,15 +31,21 @@ class GraspCandidateData:
 
 def filter_grasp_candidates_by_approach(
     candidates: List[Dict[str, Any]],
-    mode: str = "top_side",
+    mode: str = "top",
     approach_axis: int = 0,
-    min_down_dot: float = 0.25,
-    max_up_dot: float = 0.2,
+    min_down_dot: float = 0.85,
+    max_up_dot: float = 0.1,
 ) -> List[Dict[str, Any]]:
-    """Keep candidates whose approach direction is closer to top/side-top grasps.
+    """Filter candidates by approach direction in world frame.
 
     Assumes candidate["rotation"] is a 3x3 matrix in world frame and that the
     grasp approach direction is the chosen local axis of that rotation matrix.
+
+    Modes:
+      - off: keep everything
+      - top: keep only near top-down grasps (approach aligned with world down)
+      - top_side: allow top grasps plus mildly oblique side-top grasps
+      - side_top: keep mostly side grasps while rejecting upward grasps
     """
     if not candidates:
         return []
@@ -58,13 +64,14 @@ def filter_grasp_candidates_by_approach(
 
         down_dot = float(np.dot(approach, world_down))
         up_dot = float(np.dot(approach, world_up))
+        lateral_norm = float(np.linalg.norm(approach[:2]))
         keep = True
         if mode == "top":
             keep = down_dot >= float(min_down_dot) and up_dot <= float(max_up_dot)
         elif mode == "top_side":
             keep = down_dot >= float(min_down_dot) and up_dot <= float(max_up_dot)
         elif mode == "side_top":
-            keep = down_dot >= float(min_down_dot) and up_dot <= float(max_up_dot)
+            keep = lateral_norm >= float(min_down_dot) and up_dot <= float(max_up_dot)
         elif mode == "off":
             keep = True
         else:
@@ -77,6 +84,7 @@ def filter_grasp_candidates_by_approach(
             filtered_candidate = dict(candidate)
             filtered_candidate["approach_down_dot"] = down_dot
             filtered_candidate["approach_up_dot"] = up_dot
+            filtered_candidate["approach_lateral_norm"] = lateral_norm
             filtered.append(filtered_candidate)
 
     return filtered
@@ -327,11 +335,13 @@ class GraspNetInferenceCore:
 
         points_proc, colors_proc = self.preprocess_pointcloud(points, colors)
 
+        points_proc = np.asarray(points_proc, dtype=np.float32)
         end_points: Dict[str, Any] = {
-            "point_clouds": torch.from_numpy(points_proc).unsqueeze(0).to(self.device)
+            "point_clouds": torch.tensor(points_proc, dtype=torch.float32, device=self.device).unsqueeze(0)
         }
         if colors_proc is not None:
-            end_points["cloud_colors"] = torch.from_numpy(colors_proc).unsqueeze(0).to(self.device)
+            colors_proc = np.asarray(colors_proc, dtype=np.float32)
+            end_points["cloud_colors"] = torch.tensor(colors_proc, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.no_grad():
             end_points = self._model(end_points)

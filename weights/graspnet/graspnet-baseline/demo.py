@@ -81,7 +81,7 @@ def get_and_process_data(data_dir):
     cloud.points = o3d.utility.Vector3dVector(cloud_masked.astype(np.float32))
     cloud.colors = o3d.utility.Vector3dVector(color_masked.astype(np.float32))
     end_points = dict()
-    cloud_sampled = torch.from_numpy(cloud_sampled[np.newaxis].astype(np.float32))
+    cloud_sampled = torch.tensor(np.asarray(cloud_sampled[np.newaxis], dtype=np.float32), dtype=torch.float32)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     cloud_sampled = cloud_sampled.to(device)
     end_points['point_clouds'] = cloud_sampled

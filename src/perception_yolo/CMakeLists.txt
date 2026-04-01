@@ -44,7 +44,8 @@ catkin_install_python(PROGRAMS
   nodes/yolo26_seg_json_node.py
   nodes/yolo26_seg_pointcloud_node.py
   nodes/yolo26_seg_xyzl_cloud_node.py
-  nodes/yolo26_seg_xyzl_action_server_node.py
+  nodes/yolo26_seg_xyzl_instance_cloud_node.py
+  nodes/test_3dcloud_copy.py
   nodes/best_seg_gazebo_to_pcd_gpu.py
   nodes/camera_view_capture_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

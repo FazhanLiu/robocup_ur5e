@@ -63,7 +63,7 @@ def generate_grasp_views(N=300, phi=(np.sqrt(5)-1)/2, center=np.zeros(3), r=1):
         yi = np.sqrt(1 - zi**2) * np.sin(2 * i * np.pi * phi)
         views.append([xi, yi, zi])
     views = r * np.array(views) + center
-    return torch.from_numpy(views.astype(np.float32))
+    return torch.tensor(np.asarray(views, dtype=np.float32), dtype=torch.float32)
 
 def batch_viewpoint_params_to_matrix(batch_towards, batch_angle):
     """ Transform approach vectors and in-plane rotation angles to rotation matrices.

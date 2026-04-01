@@ -52,6 +52,26 @@ Shows:
 - Recent logs
 - ROS node status
 
+### `run_hybrid_cleanup.sh`
+**Run the hybrid cleanup grasp pipeline until the table is empty**
+
+```bash
+./scripts/run_hybrid_cleanup.sh
+```
+
+Assumes:
+- `arm_gazebo` is already running on `127.0.0.1:11311`
+- `cube` uses direct YOLO grasp poses
+- non-cube objects use GraspNet
+- all objects are placed into the same bin (default: `green`)
+
+Useful options:
+```bash
+./scripts/run_hybrid_cleanup.sh --bin-color green
+./scripts/run_hybrid_cleanup.sh --no-follow
+./scripts/run_hybrid_cleanup.sh --with-path-planning
+```
+
 ## 🔧 Utility Scripts
 
 ### `setup_container_env.sh`

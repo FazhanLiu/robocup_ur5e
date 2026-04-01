@@ -220,12 +220,30 @@ class Yolo26SegJsonNode:
                 if center_xyz is None:
                     continue
 
+                x1_i = int(round(x1))
+                y1_i = int(round(y1))
+                x2_i = int(round(x2))
+                y2_i = int(round(y2))
+                bbox_w = max(0, x2_i - x1_i)
+                bbox_h = max(0, y2_i - y1_i)
+
                 output.append({
                     "instance_id": int(instance_id),
+                    "class_id": int(cls_id),
                     "name": name,
                     "confidence": round(conf, 3),
                     "frame_id": rgb_msg.header.frame_id,
                     "gazebo_stamp": gazebo_stamp,
+                    "camera_fx": round(float(fx), 6),
+                    "camera_fy": round(float(fy), 6),
+                    "bbox": {
+                        "x1": x1_i,
+                        "y1": y1_i,
+                        "x2": x2_i,
+                        "y2": y2_i,
+                        "width": int(bbox_w),
+                        "height": int(bbox_h),
+                    },
                     "center_3d": {
                         "x": round(center_xyz[0], 4),
                         "y": round(center_xyz[1], 4),
