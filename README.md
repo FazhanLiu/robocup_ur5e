@@ -187,7 +187,7 @@ If you use this system in your research or reference it in publications, please 
 
 ```bibtex
 @misc{robocup_ur5e_kcl_2026,
-  author = {Suhang Xia and Jiaxin Liang and Sarvin and Chang Gao and Fazhan and Ruiyi and Muye Yuan},
+  author = {Suhang Xia and Jiaxin Liang and Sarvin and Chang Gao and Fazhan Liu and Ruiyi Hu and Muye Yuan},
   title = {RoboCup UR5e Object Sorting System},
   year = {2026},
   publisher = {King's College London},
